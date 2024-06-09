@@ -74,11 +74,14 @@ import org.eclipse.jgit.revwalk.RevSort;
 import org.eclipse.jgit.revwalk.RevWalk;
 import org.eclipse.jgit.revwalk.filter.RevFilter;
 import org.eclipse.jgit.submodule.SubmoduleWalk.IgnoreSubmoduleMode;
+import org.eclipse.jgit.transport.CredentialsProvider;
 import org.eclipse.jgit.treewalk.TreeWalk;
 import org.eclipse.jgit.treewalk.filter.TreeFilter;
 import org.eclipse.jgit.util.FileUtils;
 import org.eclipse.jgit.util.IO;
+import org.eclipse.jgit.util.LfsFactory;
 import org.eclipse.jgit.util.RawParseUtils;
+
 
 /**
  * A class used to execute a {@code Rebase} command. It has setters for all
@@ -90,7 +93,8 @@ import org.eclipse.jgit.util.RawParseUtils;
  *      href="http://www.kernel.org/pub/software/scm/git/docs/git-rebase.html"
  *      >Git documentation about Rebase</a>
  */
-public class RebaseCommand extends GitCommand<RebaseResult> {
+public class RebaseCommand
+		extends CredentialsAwareCommand<RebaseCommand, RebaseResult> {
 	/**
 	 * The name of the "rebase-merge" folder for interactive rebases.
 	 */
@@ -605,6 +609,7 @@ public class RebaseCommand extends GitCommand<RebaseResult> {
 					boolean isMerge = commitToPick.getParentCount() > 1;
 					String ourCommitName = getOurCommitName();
 					CherryPickCommand pickCommand = git.cherryPick()
+							.setCredentialsProvider(credentialsProvider)
 							.include(commitToPick)
 							.setOurCommitName(ourCommitName)
 							.setReflogPrefix(REFLOG_PREFIX)
@@ -631,6 +636,7 @@ public class RebaseCommand extends GitCommand<RebaseResult> {
 							// Commit the merge (setup above using
 							// writeMergeInfo())
 							CommitCommand commit = git.commit();
+							commit.setCredentialsProvider(credentialsProvider);
 							commit.setAuthor(commitToPick.getAuthorIdent());
 							commit.setReflogComment(REFLOG_PREFIX + " " //$NON-NLS-1$
 									+ commitToPick.getShortMessage());
@@ -653,6 +659,7 @@ public class RebaseCommand extends GitCommand<RebaseResult> {
 					MergeResult mergeResult = merge.call();
 					if (mergeResult.getMergeStatus().isSuccessful()) {
 						CommitCommand commit = git.commit();
+						commit.setCredentialsProvider(credentialsProvider);
 						commit.setAuthor(commitToPick.getAuthorIdent());
 						commit.setMessage(commitToPick.getFullMessage());
 						commit.setReflogComment(REFLOG_PREFIX + " " //$NON-NLS-1$
@@ -1035,6 +1042,7 @@ public class RebaseCommand extends GitCommand<RebaseResult> {
 		if (needsCommit) {
 			try (Git git = new Git(repo)) {
 				CommitCommand commit = git.commit();
+				commit.setCredentialsProvider(credentialsProvider);
 				commit.setMessage(rebaseState.readFile(MESSAGE));
 				commit.setAuthor(parseAuthor());
 				return commit.call();
@@ -1065,9 +1073,18 @@ public class RebaseCommand extends GitCommand<RebaseResult> {
 		rebaseState.createFile(MESSAGE, commitToPick.getFullMessage());
 		if (commitToPick.getParentCount() > 0) {
 			ByteArrayOutputStream bos = new ByteArrayOutputStream();
+			CredentialsProvider prevProvider = null;
 			try (DiffFormatter df = new DiffFormatter(bos)) {
+				if (credentialsProvider != null) {
+					prevProvider = LfsFactory.getCredentialsProvider();
+					LfsFactory.setCredentialsProvider(credentialsProvider);
+				}
 				df.setRepository(repo);
 				df.format(commitToPick.getParent(0), commitToPick);
+			} finally {
+				if (credentialsProvider != null) {
+					LfsFactory.setCredentialsProvider(prevProvider);
+				}
 			}
 			rebaseState.createFile(PATCH, new String(bos.toByteArray(), UTF_8));
 		} else {
@@ -1340,6 +1357,7 @@ public class RebaseCommand extends GitCommand<RebaseResult> {
 
 		CheckoutCommand co = new CheckoutCommand(repo);
 		try {
+			co.setCredentialsProvider(credentialsProvider);
 			co.setProgressMonitor(monitor);
 			co.setName(newCommit.name()).call();
 			if (headName.startsWith(Constants.R_HEADS)) {

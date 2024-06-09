@@ -33,8 +33,10 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.Enumeration;
 import java.util.LinkedHashSet;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
+import java.util.Vector;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 import org.eclipse.jgit.annotations.NonNull;
@@ -51,6 +53,7 @@ import org.eclipse.jgit.lib.ProgressMonitor;
 import org.eclipse.jgit.lib.Ref;
 import org.eclipse.jgit.lib.Repository;
 import org.eclipse.jgit.storage.pack.PackConfig;
+import org.eclipse.jgit.util.LfsFactory;
 
 /**
  * Connects two Git repositories together and copies objects between them.
@@ -1544,15 +1547,32 @@ public abstract class Transport implements AutoCloseable {
 		}
 
 		PrePushHook prePush = null;
+		PushResult result = null;
 		if (local != null) {
+			CredentialsProvider prevProvider = null;
+
+			if (credentialsProvider != null) {
+				prevProvider = LfsFactory.getCredentialsProvider();
+				LfsFactory.setCredentialsProvider(credentialsProvider);
+			}
+
 			// Pushing will always have a local repository. But better safe than
 			// sorry.
 			prePush = Hooks.prePush(local, hookOutRedirect, hookErrRedirect);
 			prePush.setRemoteLocation(uri.toString());
 			prePush.setRemoteName(remoteName);
+
+			PushProcess pushProcess = new PushProcess(this, toPush, prePush,
+					out);
+			result = pushProcess.execute(monitor);
+
+			if (credentialsProvider != null) {
+				LfsFactory.setCredentialsProvider(prevProvider);
+			}
+
 		}
-		PushProcess pushProcess = new PushProcess(this, toPush, prePush, out);
-		return pushProcess.execute(monitor);
+		return result;
+
 	}
 
 	/**

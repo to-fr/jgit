@@ -84,7 +84,8 @@ import org.slf4j.LoggerFactory;
  *      href="http://www.kernel.org/pub/software/scm/git/docs/git-commit.html"
  *      >Git documentation about Commit</a>
  */
-public class CommitCommand extends GitCommand<RevCommit> {
+public class CommitCommand
+		extends CredentialsAwareCommand<CommitCommand, RevCommit> {
 	private static final Logger log = LoggerFactory
 			.getLogger(CommitCommand.class);
 
@@ -133,8 +134,6 @@ public class CommitCommand extends GitCommand<RevCommit> {
 
 	private GpgConfig gpgConfig;
 
-	private CredentialsProvider credentialsProvider;
-
 	private @NonNull CleanupMode cleanupMode = CleanupMode.VERBATIM;
 
 	private boolean cleanDefaultIsStrip = true;
@@ -149,7 +148,6 @@ public class CommitCommand extends GitCommand<RevCommit> {
 	 */
 	protected CommitCommand(Repository repo) {
 		super(repo);
-		this.credentialsProvider = CredentialsProvider.getDefault();
 	}
 
 	/**
@@ -1126,18 +1124,4 @@ public class CommitCommand extends GitCommand<RevCommit> {
 		return this;
 	}
 
-	/**
-	 * Sets a {@link CredentialsProvider}
-	 *
-	 * @param credentialsProvider
-	 *            the provider to use when querying for credentials (eg., during
-	 *            signing)
-	 * @return {@code this}
-	 * @since 6.0
-	 */
-	public CommitCommand setCredentialsProvider(
-			CredentialsProvider credentialsProvider) {
-		this.credentialsProvider = credentialsProvider;
-		return this;
-	}
 }

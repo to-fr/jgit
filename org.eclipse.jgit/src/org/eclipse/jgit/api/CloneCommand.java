@@ -43,6 +43,7 @@ import org.eclipse.jgit.lib.Repository;
 import org.eclipse.jgit.revwalk.RevCommit;
 import org.eclipse.jgit.revwalk.RevWalk;
 import org.eclipse.jgit.submodule.SubmoduleWalk;
+import org.eclipse.jgit.transport.CredentialsProvider;
 import org.eclipse.jgit.transport.FetchResult;
 import org.eclipse.jgit.transport.RefSpec;
 import org.eclipse.jgit.transport.RemoteConfig;
@@ -50,6 +51,7 @@ import org.eclipse.jgit.transport.TagOpt;
 import org.eclipse.jgit.transport.URIish;
 import org.eclipse.jgit.util.FS;
 import org.eclipse.jgit.util.FileUtils;
+import org.eclipse.jgit.util.LfsFactory;
 
 /**
  * Clone a repository into a new working directory
@@ -386,11 +388,23 @@ public class CloneCommand extends TransportCommand<CloneCommand, Git> {
 		u.forceUpdate();
 
 		if (!bare && !noCheckout) {
-			DirCache dc = clonedRepo.lockDirCache();
-			DirCacheCheckout co = new DirCacheCheckout(clonedRepo, dc,
-					commit.getTree());
-			co.setProgressMonitor(monitor);
-			co.checkout();
+			CredentialsProvider prevProvider = null;
+			try {
+				if (credentialsProvider != null) {
+					prevProvider = LfsFactory.getCredentialsProvider();
+					LfsFactory.setCredentialsProvider(credentialsProvider);
+				}
+				DirCache dc = clonedRepo.lockDirCache();
+				DirCacheCheckout co = new DirCacheCheckout(clonedRepo, dc,
+						commit.getTree());
+				co.setProgressMonitor(monitor);
+				co.checkout();
+			} finally {
+				if (credentialsProvider != null) {
+					LfsFactory.setCredentialsProvider(prevProvider);
+				}
+			}
+
 			if (cloneSubmodules)
 				cloneSubmodules(clonedRepo);
 		}
