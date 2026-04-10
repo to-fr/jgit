@@ -52,8 +52,10 @@ import org.eclipse.jgit.merge.ContentMergeStrategy;
 import org.eclipse.jgit.merge.MergeStrategy;
 import org.eclipse.jgit.revwalk.RevCommit;
 import org.eclipse.jgit.revwalk.RevWalk;
+import org.eclipse.jgit.transport.CredentialsProvider;
 import org.eclipse.jgit.transport.FetchResult;
 import org.eclipse.jgit.transport.TagOpt;
+import org.eclipse.jgit.util.LfsFactory;
 
 /**
  * The Pull command
@@ -331,7 +333,13 @@ public class PullCommand extends TransportCommand<PullCommand, PullResult> {
 				ObjectId headId = head.getObjectId();
 				if (headId == null) {
 					// Pull on an unborn branch: checkout
+					CredentialsProvider prevProvider = null;
 					try (RevWalk revWalk = new RevWalk(repo)) {
+						if (credentialsProvider != null) {
+							prevProvider = LfsFactory.getCredentialsProvider();
+							LfsFactory.setCredentialsProvider(
+									credentialsProvider);
+						}
 						RevCommit srcCommit = revWalk
 								.parseCommit(commitToMerge);
 						DirCacheCheckout dco = new DirCacheCheckout(repo,
@@ -353,7 +361,12 @@ public class PullCommand extends TransportCommand<PullCommand, PullResult> {
 								RebaseResult.result(
 										RebaseResult.Status.FAST_FORWARD,
 										srcCommit));
+					} finally {
+						if (credentialsProvider != null) {
+							LfsFactory.setCredentialsProvider(prevProvider);
+						}
 					}
+
 				}
 			} catch (NoHeadException e) {
 				throw e;
@@ -371,6 +384,7 @@ public class PullCommand extends TransportCommand<PullCommand, PullResult> {
 					.setConflictStyle(getConflictStyle())
 					.setPreserveMerges(
 							pullRebaseMode == BranchRebaseMode.MERGES)
+					.setCredentialsProvider(credentialsProvider)
 					.call();
 			result = new PullResult(fetchRes, remote, rebaseRes);
 		} else {
@@ -380,6 +394,7 @@ public class PullCommand extends TransportCommand<PullCommand, PullResult> {
 					.setStrategy(strategy)
 					.setContentMergeStrategy(contentStrategy)
 					.setConflictStyle(getConflictStyle())
+					.setCredentialsProvider(credentialsProvider)
 					.setFastForward(getFastForwardMode()).call();
 			monitor.update(1);
 			result = new PullResult(fetchRes, remote, mergeRes);

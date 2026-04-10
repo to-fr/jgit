@@ -28,10 +28,12 @@ import org.eclipse.jgit.lib.ObjectId;
 import org.eclipse.jgit.lib.ObjectReader;
 import org.eclipse.jgit.lib.ProgressMonitor;
 import org.eclipse.jgit.lib.Repository;
+import org.eclipse.jgit.transport.CredentialsProvider;
 import org.eclipse.jgit.treewalk.AbstractTreeIterator;
 import org.eclipse.jgit.treewalk.CanonicalTreeParser;
 import org.eclipse.jgit.treewalk.FileTreeIterator;
 import org.eclipse.jgit.treewalk.filter.TreeFilter;
+import org.eclipse.jgit.util.LfsFactory;
 import org.eclipse.jgit.util.io.NullOutputStream;
 
 /**
@@ -40,7 +42,8 @@ import org.eclipse.jgit.util.io.NullOutputStream;
  * @see <a href="http://www.kernel.org/pub/software/scm/git/docs/git-diff.html"
  *      >Git documentation about diff</a>
  */
-public class DiffCommand extends GitCommand<List<DiffEntry>> {
+public class DiffCommand
+		extends CredentialsAwareCommand<DiffCommand, List<DiffEntry>> {
 	private AbstractTreeIterator oldTree;
 
 	private AbstractTreeIterator newTree;
@@ -89,7 +92,12 @@ public class DiffCommand extends GitCommand<List<DiffEntry>> {
 	 */
 	@Override
 	public List<DiffEntry> call() throws GitAPIException {
+		CredentialsProvider prevProvider = null;
 		try (DiffFormatter diffFmt = getDiffFormatter()) {
+			if (credentialsProvider != null) {
+				prevProvider = LfsFactory.getCredentialsProvider();
+				LfsFactory.setCredentialsProvider(credentialsProvider);
+			}
 			diffFmt.setRepository(repo);
 			diffFmt.setProgressMonitor(monitor);
 			if (cached) {
@@ -133,7 +141,12 @@ public class DiffCommand extends GitCommand<List<DiffEntry>> {
 			return result;
 		} catch (IOException e) {
 			throw new JGitInternalException(e.getMessage(), e);
+		} finally {
+			if (credentialsProvider != null) {
+				LfsFactory.setCredentialsProvider(prevProvider);
+			}
 		}
+
 	}
 
 	/**
