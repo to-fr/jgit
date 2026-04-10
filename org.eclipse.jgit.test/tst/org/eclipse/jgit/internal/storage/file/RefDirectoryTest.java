@@ -37,6 +37,7 @@ import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
+import org.eclipse.jgit.api.PackRefsCommand;
 import org.eclipse.jgit.errors.LockFailedException;
 import org.eclipse.jgit.events.ListenerHandle;
 import org.eclipse.jgit.events.RefsChangedEvent;
@@ -44,6 +45,7 @@ import org.eclipse.jgit.junit.LocalDiskRepositoryTestCase;
 import org.eclipse.jgit.junit.Repeat;
 import org.eclipse.jgit.junit.TestRepository;
 import org.eclipse.jgit.lib.AnyObjectId;
+import org.eclipse.jgit.lib.Constants;
 import org.eclipse.jgit.lib.Ref;
 import org.eclipse.jgit.lib.Ref.Storage;
 import org.eclipse.jgit.lib.RefDatabase;
@@ -90,25 +92,26 @@ public class RefDirectoryTest extends LocalDiskRepositoryTestCase {
 	@Test
 	public void testCreate() throws IOException {
 		// setUp above created the directory. We just have to test it.
-		File d = diskRepo.getDirectory();
+		File gitDir = diskRepo.getDirectory();
+		File commonDir = diskRepo.getCommonDirectory();
 		assertSame(diskRepo, refdir.getRepository());
 
-		assertTrue(new File(d, "refs").isDirectory());
-		assertTrue(new File(d, "logs").isDirectory());
-		assertTrue(new File(d, "logs/refs").isDirectory());
-		assertFalse(new File(d, "packed-refs").exists());
+		assertTrue(new File(commonDir, "refs").isDirectory());
+		assertTrue(new File(commonDir, "logs").isDirectory());
+		assertTrue(new File(commonDir, "logs/refs").isDirectory());
+		assertFalse(new File(commonDir, "packed-refs").exists());
 
-		assertTrue(new File(d, "refs/heads").isDirectory());
-		assertTrue(new File(d, "refs/tags").isDirectory());
-		assertEquals(2, new File(d, "refs").list().length);
-		assertEquals(0, new File(d, "refs/heads").list().length);
-		assertEquals(0, new File(d, "refs/tags").list().length);
+		assertTrue(new File(commonDir, "refs/heads").isDirectory());
+		assertTrue(new File(commonDir, "refs/tags").isDirectory());
+		assertEquals(2, new File(commonDir, "refs").list().length);
+		assertEquals(0, new File(commonDir, "refs/heads").list().length);
+		assertEquals(0, new File(commonDir, "refs/tags").list().length);
 
-		assertTrue(new File(d, "logs/refs/heads").isDirectory());
-		assertFalse(new File(d, "logs/HEAD").exists());
-		assertEquals(0, new File(d, "logs/refs/heads").list().length);
+		assertTrue(new File(commonDir, "logs/refs/heads").isDirectory());
+		assertFalse(new File(gitDir, "logs/HEAD").exists());
+		assertEquals(0, new File(commonDir, "logs/refs/heads").list().length);
 
-		assertEquals("ref: refs/heads/master\n", read(new File(d, HEAD)));
+		assertEquals("ref: refs/heads/master\n", read(new File(gitDir, HEAD)));
 	}
 
 	@Test(expected = UnsupportedOperationException.class)
@@ -1061,6 +1064,60 @@ public class RefDirectoryTest extends LocalDiskRepositoryTestCase {
 	}
 
 	@Test
+	public void testPackedRefsHeaderWithSorted() throws Exception {
+		writeLooseRef("refs/heads/master", A);
+		writeLooseRef("refs/heads/other", B);
+		writeLooseRef("refs/tags/v1.0", v1_0);
+
+		PackRefsCommand packRefsCommand = new PackRefsCommand(diskRepo);
+		packRefsCommand.setAll(true);
+		packRefsCommand.call();
+
+		File packedRefsFile = new File(diskRepo.getCommonDirectory(), Constants.PACKED_REFS);
+		assertTrue("packed-refs should exist", packedRefsFile.exists());
+
+		String content = read(packedRefsFile);
+		String firstLine = content.split("\n")[0];
+		assertTrue("packed-refs should have header with sorted",
+				firstLine.contains(" sorted"));
+
+		int masterIndex = content.indexOf(A.name() + " refs/heads/master");
+		int otherIndex = content.indexOf(B.name() + " refs/heads/other");
+		int tagIndex = content.indexOf(v1_0.name() + " refs/tags/v1.0");
+		assertTrue("packed-refs should be sorted",
+				masterIndex < otherIndex && otherIndex < tagIndex);
+	}
+
+	@Test
+	public void testPackedRefsUnsortedGetsSorted() throws Exception {
+		writePackedRefs("# pack-refs with: peeled \n" + //
+				B.name() + " refs/heads/other\n" + //
+				v1_0.name() + " refs/tags/v1.0\n" + //
+				"^" + v1_0.getObject().name() + "\n" + //
+				A.name() + " refs/heads/master\n");
+
+		// extra loose-ref to trigger packing
+		writeLooseRef("refs/heads/loose", A);
+
+		PackRefsCommand packRefsCommand = new PackRefsCommand(diskRepo);
+		packRefsCommand.setAll(true);
+		packRefsCommand.call();
+
+		File packedRefsFile = new File(diskRepo.getCommonDirectory(), Constants.PACKED_REFS);
+		String content = read(packedRefsFile);
+		int looseIndex = content.indexOf(v1_0.name() + " refs/tags/loose");
+		int masterIndex = content.indexOf(A.name() + " refs/heads/master");
+		int otherIndex = content.indexOf(B.name() + " refs/heads/other");
+		int tagIndex = content.indexOf(v1_0.name() + " refs/tags/v1.0");
+		assertTrue(
+				"packed-refs should be sorted",
+				looseIndex < masterIndex &&
+						masterIndex < otherIndex &&
+						otherIndex < tagIndex
+		);
+	}
+
+	@Test
 	public void testFindRef_EmptyDatabase() throws IOException {
 		Ref r;
 
@@ -1382,7 +1439,7 @@ public class RefDirectoryTest extends LocalDiskRepositoryTestCase {
 	}
 
 	private void deleteLooseRef(String name) {
-		File path = new File(diskRepo.getDirectory(), name);
+		File path = new File(diskRepo.getCommonDirectory(), name);
 		assertTrue("deleted " + name, path.delete());
 	}
 }

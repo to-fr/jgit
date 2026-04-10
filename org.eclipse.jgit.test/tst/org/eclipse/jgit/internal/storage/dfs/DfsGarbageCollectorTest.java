@@ -4,8 +4,10 @@ import static org.eclipse.jgit.internal.storage.dfs.DfsObjDatabase.PackSource.GC
 import static org.eclipse.jgit.internal.storage.dfs.DfsObjDatabase.PackSource.GC_REST;
 import static org.eclipse.jgit.internal.storage.dfs.DfsObjDatabase.PackSource.INSERT;
 import static org.eclipse.jgit.internal.storage.dfs.DfsObjDatabase.PackSource.UNREACHABLE_GARBAGE;
+import static org.eclipse.jgit.internal.storage.pack.PackExt.MULTI_PACK_INDEX;
 import static org.eclipse.jgit.internal.storage.pack.PackExt.PACK;
 import static org.eclipse.jgit.internal.storage.pack.PackExt.REFTABLE;
+import static org.eclipse.jgit.lib.Constants.OBJECT_ID_LENGTH;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
@@ -15,14 +17,21 @@ import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 import java.io.IOException;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.List;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
+
 import org.eclipse.jgit.internal.storage.commitgraph.CommitGraph;
 import org.eclipse.jgit.internal.storage.commitgraph.CommitGraphWriter;
 import org.eclipse.jgit.internal.storage.dfs.DfsObjDatabase.PackSource;
 import org.eclipse.jgit.internal.storage.file.PackBitmapIndex;
 import org.eclipse.jgit.internal.storage.pack.PackExt;
+import org.eclipse.jgit.internal.storage.reftable.LogCursor;
 import org.eclipse.jgit.internal.storage.reftable.RefCursor;
 import org.eclipse.jgit.internal.storage.reftable.ReftableConfig;
 import org.eclipse.jgit.internal.storage.reftable.ReftableReader;
@@ -36,6 +45,8 @@ import org.eclipse.jgit.lib.ConfigConstants;
 import org.eclipse.jgit.lib.NullProgressMonitor;
 import org.eclipse.jgit.lib.ObjectId;
 import org.eclipse.jgit.lib.ObjectIdRef;
+import org.eclipse.jgit.lib.PersonIdent;
+import org.eclipse.jgit.lib.ProgressMonitor;
 import org.eclipse.jgit.lib.Ref;
 import org.eclipse.jgit.lib.Repository;
 import org.eclipse.jgit.revwalk.RevBlob;
@@ -43,6 +54,7 @@ import org.eclipse.jgit.revwalk.RevCommit;
 import org.eclipse.jgit.revwalk.RevWalk;
 import org.eclipse.jgit.storage.pack.PackConfig;
 import org.eclipse.jgit.transport.ReceiveCommand;
+import org.eclipse.jgit.util.GitTimeParser;
 import org.eclipse.jgit.util.SystemReader;
 import org.junit.After;
 import org.junit.Before;
@@ -55,12 +67,15 @@ public class DfsGarbageCollectorTest {
 	private DfsObjDatabase odb;
 	private MockSystemReader mockSystemReader;
 
+	private static final ProgressMonitor NULL_PM = NullProgressMonitor.INSTANCE;
+
 	@Before
 	public void setUp() throws IOException {
 		DfsRepositoryDescription desc = new DfsRepositoryDescription("test");
 		git = new TestRepository<>(new InMemoryRepository(desc));
 		repo = git.getRepository();
 		odb = repo.getObjectDatabase();
+		odb.setUseMultipackIndex(true);
 		mockSystemReader = new MockSystemReader();
 		SystemReader.setInstance(mockSystemReader);
 	}
@@ -1171,10 +1186,12 @@ public class DfsGarbageCollectorTest {
 
 		gcWithObjectSizeIndex(10);
 
+		odb.getReaderOptions().setUseObjectSizeIndex(true);
 		DfsReader reader = odb.newReader();
 		DfsPackFile gcPack = findFirstBySource(odb.getPacks(), GC);
 		assertTrue(gcPack.hasObjectSizeIndex(reader));
-		assertEquals(12, gcPack.getIndexedObjectSize(reader, headsBlob));
+		assertEquals(12, gcPack.getIndexedObjectSize(reader,
+				gcPack.findIdxPosition(reader, headsBlob)));
 	}
 
 	@Test
@@ -1191,10 +1208,12 @@ public class DfsGarbageCollectorTest {
 
 		gcWithObjectSizeIndex(10);
 
+		odb.getReaderOptions().setUseObjectSizeIndex(true);
 		DfsReader reader = odb.newReader();
 		DfsPackFile gcPack = findFirstBySource(odb.getPacks(), GC);
 		assertTrue(gcPack.hasObjectSizeIndex(reader));
-		assertEquals(-1, gcPack.getIndexedObjectSize(reader, tooSmallBlob));
+		assertEquals(-1, gcPack.getIndexedObjectSize(reader,
+				gcPack.findIdxPosition(reader, tooSmallBlob)));
 	}
 
 	@Test
@@ -1213,6 +1232,115 @@ public class DfsGarbageCollectorTest {
 		DfsReader reader = odb.newReader();
 		DfsPackFile gcRestPack = findFirstBySource(odb.getPacks(), UNREACHABLE_GARBAGE);
 		assertFalse(gcRestPack.hasObjectSizeIndex(reader));
+	}
+
+	@Test
+	public void midx_oneMidx_deleteMidxs_allObjectsOneGC() throws Exception {
+		String master = "refs/heads/master";
+		RevCommit root = git.branch(master).commit().message("root").noParents()
+				.create();
+		git.branch(master).commit().message("commit on head")
+				.add("file.txt", git.blob("a blob")).parent(root).create();
+		assertEquals(3, countPacks(INSERT));
+
+		DfsPackDescription midx = midx(Arrays.asList(odb.getPacks()), null);
+		odb.commitPack(List.of(midx), null);
+
+		gcNoTtl();
+
+		// Only one pack, is GC but not multipack index
+		assertEquals(1, odb.getPacks().length);
+		DfsPackDescription actualDesc = odb.getPacks()[0].getPackDescription();
+		assertEquals(GC, actualDesc.getPackSource());
+		assertFalse(actualDesc.hasFileExt(MULTI_PACK_INDEX));
+		DfsPackFile pack = odb.getPacks()[0];
+		assertFalse(pack instanceof DfsPackFileMidx);
+		assertFalse(odb.listPacks().contains(midx));
+	}
+
+	@Test
+	public void midx_chainedMidx_deleteMidxs_allObjsInOneGC() throws Exception {
+		String master = "refs/heads/master";
+		List<RevCommit> knownCommits = new ArrayList<>(11);
+		RevCommit root = git.branch(master).commit().message("root").noParents()
+				.create();
+		knownCommits.add(root);
+		RevCommit tip = root;
+		for (int i = 0; i < 10; i++) {
+			tip = git.branch(master).commit().message("commit on head")
+					.add("file.txt", git.blob("a blob " + i)).parent(tip)
+					.create();
+			knownCommits.add(tip);
+			// Each of these creates two packs
+		}
+		assertEquals(21, countPacks(INSERT));
+
+		List<DfsPackFile> basicPacks = Arrays.stream(odb.getPacks())
+				.collect(Collectors.toUnmodifiableList());
+		DfsPackDescription baseMidx = midx(basicPacks.subList(0, 9), null);
+		odb.commitPack(List.of(baseMidx), null);
+
+		DfsPackDescription tipMidx = midx(basicPacks.subList(9, 21), baseMidx);
+		odb.commitPack(List.of(tipMidx), null);
+
+		// Verify we got one pack that is an midx
+		// This is testing the test code
+		assertEquals(1, odb.getPacks().length);
+		assertTrue(odb.getPacks()[0] instanceof DfsPackFileMidx);
+		DfsPackDescription theDesc = odb.getPacks()[0].getPackDescription();
+		assertTrue(theDesc.hasFileExt(MULTI_PACK_INDEX));
+		assertEquals(12, theDesc.getCoveredPacks().size());
+		assertEquals(theDesc.getMultiPackIndexBase(), baseMidx);
+		assertEquals(9,
+				theDesc.getMultiPackIndexBase().getCoveredPacks().size());
+		gcNoTtl();
+
+		// One pack, GC WITHOUT multipack index, contains ALL objects
+		assertEquals(1, odb.getPacks().length);
+		DfsPackFile pack = odb.getPacks()[0];
+		assertEquals(GC, pack.getPackDescription().getPackSource());
+		assertFalse(pack instanceof DfsPackFileMidx);
+		assertFalse(pack.getPackDescription().hasFileExt(MULTI_PACK_INDEX));
+		for (RevCommit c : knownCommits) {
+			assertTrue(isObjectInPack(c, pack));
+		}
+		assertFalse(odb.listPacks().contains(baseMidx));
+		assertFalse(odb.listPacks().contains(tipMidx));
+	}
+
+	@Test
+	public void midx_packAndMidx_deleteMidxs_allObjectsOneGC()
+			throws Exception {
+		String master = "refs/heads/master";
+		RevCommit root = git.branch(master).commit().message("root").noParents()
+				.create();
+		RevCommit tip = git.branch(master).commit().message("commit on head")
+				.add("file.txt", git.blob("a blob")).parent(root).create();
+		assertEquals(3, countPacks(INSERT));
+
+		List<DfsPackFile> packs = Arrays.stream(odb.getPacks()).toList();
+		DfsPackDescription midx = midx(packs, null);
+		odb.commitPack(List.of(midx), null);
+
+		RevBlob blobOutOfMidx = git.blob("some content");
+		RevCommit commitOutOfMidx = git.branch(master).commit()
+				.message("an extra commit").add("other.txt", blobOutOfMidx)
+				.parent(tip).create();
+		assertEquals(3, odb.getPacks().length); // midx + 2 new packs
+		gcNoTtl();
+
+		// Only one pack, is GC but not multipack index
+		assertEquals(1, odb.getPacks().length);
+		DfsPackDescription actualDesc = odb.getPacks()[0].getPackDescription();
+		assertEquals(GC, actualDesc.getPackSource());
+		assertFalse(actualDesc.hasFileExt(MULTI_PACK_INDEX));
+		assertFalse(odb.listPacks().contains(midx));
+
+		DfsPackFile pack = odb.getPacks()[0];
+		assertTrue(isObjectInPack(root, pack));
+		assertTrue(isObjectInPack(root, pack));
+		assertTrue(isObjectInPack(blobOutOfMidx, pack));
+		assertTrue(isObjectInPack(commitOutOfMidx, pack));
 	}
 
 	@Test
@@ -1272,6 +1400,87 @@ public class DfsGarbageCollectorTest {
 				bitmapIndex.getXorBitmapCount() > 0);
 	}
 
+	@Test
+	public void gitGCWithRefLogExpire() throws Exception {
+		String master = "refs/heads/master";
+		RevCommit commit0 = commit().message("0").create();
+		RevCommit commit1 = commit().message("1").parent(commit0).create();
+		git.update(master, commit1);
+		DfsGarbageCollector gc = new DfsGarbageCollector(repo);
+		gc.setReftableConfig(new ReftableConfig());
+		run(gc);
+		DfsPackDescription t1 = odb.newPack(INSERT);
+		Ref next = new ObjectIdRef.PeeledNonTag(Ref.Storage.LOOSE,
+				"refs/heads/next", commit0.copy());
+		Instant currentDay = Instant.now();
+		Instant ten_days_ago = GitTimeParser.parseInstant("10 days ago");
+		Instant twenty_days_ago = GitTimeParser.parseInstant("20 days ago");
+		Instant thirty_days_ago = GitTimeParser.parseInstant("30 days ago");
+		Instant fifty_days_ago = GitTimeParser.parseInstant("50 days ago");
+		final ZoneOffset offset = ZoneOffset.ofHours(-8);
+		PersonIdent who2 = new PersonIdent("J.Author", "authemail", currentDay,
+				offset);
+		PersonIdent who3 = new PersonIdent("J.Author", "authemail",
+				ten_days_ago, offset);
+		PersonIdent who4 = new PersonIdent("J.Author", "authemail",
+				twenty_days_ago, offset);
+		PersonIdent who5 = new PersonIdent("J.Author", "authemail",
+				thirty_days_ago, offset);
+		PersonIdent who6 = new PersonIdent("J.Author", "authemail",
+				fifty_days_ago, offset);
+
+		try (DfsOutputStream out = odb.writeFile(t1, REFTABLE)) {
+			ReftableWriter w = new ReftableWriter(out);
+			w.setMinUpdateIndex(42);
+			w.setMaxUpdateIndex(42);
+			w.begin();
+			w.sortAndWriteRefs(Collections.singleton(next));
+			w.writeLog("refs/heads/branch", 1, who2, ObjectId.zeroId(),id(2), "Branch Message");
+			w.writeLog("refs/heads/branch1", 2, who3, ObjectId.zeroId(),id(3), "Branch Message1");
+			w.writeLog("refs/heads/branch2", 2, who4, ObjectId.zeroId(),id(4), "Branch Message2");
+			w.writeLog("refs/heads/branch3", 2, who5, ObjectId.zeroId(),id(5), "Branch Message3");
+			w.writeLog("refs/heads/branch4", 2, who6, ObjectId.zeroId(),id(6), "Branch Message4");
+			w.finish();
+			t1.addFileExt(REFTABLE);
+			t1.setReftableStats(w.getStats());
+		}
+		odb.commitPack(Collections.singleton(t1), null);
+
+		gc = new DfsGarbageCollector(repo);
+		gc.setReftableConfig(new ReftableConfig());
+		// Expire ref log entries older than 30 days
+		gc.setRefLogExpire(thirty_days_ago);
+		run(gc);
+
+		// Single GC pack present with all objects.
+		assertEquals(1, odb.getPacks().length);
+		DfsPackFile pack = odb.getPacks()[0];
+		DfsPackDescription desc = pack.getPackDescription();
+
+		DfsReftable table = new DfsReftable(DfsBlockCache.getInstance(), desc);
+		try (DfsReader ctx = odb.newReader();
+			 ReftableReader rr = table.open(ctx);
+			 RefCursor rc = rr.allRefs();
+			 LogCursor lc = rr.allLogs()) {
+			assertTrue(rc.next());
+			assertEquals(master, rc.getRef().getName());
+			assertEquals(commit1, rc.getRef().getObjectId());
+			assertTrue(rc.next());
+			assertEquals(next.getName(), rc.getRef().getName());
+			assertEquals(commit0, rc.getRef().getObjectId());
+			assertFalse(rc.next());
+			assertTrue(lc.next());
+			assertEquals(lc.getRefName(),"refs/heads/branch");
+			assertTrue(lc.next());
+			assertEquals(lc.getRefName(),"refs/heads/branch1");
+			assertTrue(lc.next());
+			assertEquals(lc.getRefName(),"refs/heads/branch2");
+			// Old entries are purged
+			assertFalse(lc.next());
+		}
+	}
+
+
 	private RevCommit commitChain(RevCommit parent, int length)
 			throws Exception {
 		for (int i = 0; i < length; i++) {
@@ -1284,6 +1493,15 @@ public class DfsGarbageCollectorTest {
 		return Arrays.stream(packs)
 				.filter(p -> p.getPackDescription().getPackSource() == source)
 				.findFirst().get();
+	}
+
+	private DfsPackDescription midx(List<DfsPackFile> coveredPacks,
+			DfsPackDescription base) throws IOException {
+		DfsPackDescription midx = DfsMidxWriter.writeMidx(NULL_PM, odb,
+				coveredPacks, base);
+		git.tick(1);
+		midx.setLastModified(git.getInstant().toEpochMilli());
+		return midx;
 	}
 
 	private TestRepository<InMemoryRepository>.CommitBuilder commit() {
@@ -1360,5 +1578,13 @@ public class DfsGarbageCollectorTest {
 			}
 		}
 		return cnt;
+	}
+	private static ObjectId id(int i) {
+		byte[] buf = new byte[OBJECT_ID_LENGTH];
+		buf[0] = (byte) (i & 0xff);
+		buf[1] = (byte) ((i >>> 8) & 0xff);
+		buf[2] = (byte) ((i >>> 16) & 0xff);
+		buf[3] = (byte) (i >>> 24);
+		return ObjectId.fromRaw(buf);
 	}
 }

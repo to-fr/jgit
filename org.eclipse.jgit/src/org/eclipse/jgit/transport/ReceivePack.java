@@ -40,6 +40,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
@@ -88,52 +89,6 @@ import org.eclipse.jgit.util.io.TimeoutOutputStream;
  * Implements the server side of a push connection, receiving objects.
  */
 public class ReceivePack {
-	/**
-	 * Data in the first line of a request, the line itself plus capabilities.
-	 *
-	 * @deprecated Use {@link FirstCommand} instead.
-	 * @since 5.6
-	 */
-	@Deprecated
-	public static class FirstLine {
-		private final FirstCommand command;
-
-		/**
-		 * Parse the first line of a receive-pack request.
-		 *
-		 * @param line
-		 *            line from the client.
-		 */
-		public FirstLine(String line) {
-			command = FirstCommand.fromLine(line);
-		}
-
-		/**
-		 * Get non-capabilities part of the line
-		 *
-		 * @return non-capabilities part of the line.
-		 */
-		public String getLine() {
-			return command.getLine();
-		}
-
-		/**
-		 * Get capabilities parsed from the line
-		 *
-		 * @return capabilities parsed from the line.
-		 */
-		public Set<String> getCapabilities() {
-			Set<String> reconstructedCapabilites = new HashSet<>();
-			for (Map.Entry<String, String> e : command.getCapabilities()
-					.entrySet()) {
-				String cap = e.getValue() == null ? e.getKey()
-						: e.getKey() + "=" + e.getValue(); //$NON-NLS-1$
-				reconstructedCapabilites.add(cap);
-			}
-
-			return reconstructedCapabilites;
-		}
-	}
 
 	/** Database we write the stored objects into. */
 	private final Repository db;
@@ -1421,6 +1376,11 @@ public class ReceivePack {
 			if (hasCommands()) {
 				readPostCommands(pck);
 			}
+			// Verify that push options in the certificate match the post-command ones.
+			if (pushCert != null) {
+				validateCertificatePushOptions(pushCert.getPushOptions(),
+						pushOptions, commands);
+			}
 		} catch (Throwable t) {
 			discardCommands();
 			throw t;
@@ -1449,6 +1409,35 @@ public class ReceivePack {
 			throw new PackProtocolException(e.getMessage(), e);
 		}
 		clientShallowCommits.add(id);
+	}
+
+	/**
+	 * Validates that push options in the certificate match the post-command
+	 * push options. If they don't match, marks all commands as rejected.
+	 * <p>
+	 * This prevents tampering with signed push certificates by ensuring the
+	 * options that were signed match exactly the options sent after the
+	 * commands.
+	 *
+	 * @param certPushOptions
+	 *            the push options from the certificate
+	 * @param postCommandPushOptions
+	 *            the push options sent after commands (may be null)
+	 * @param commands
+	 *            the list of commands to reject if validation fails
+	 */
+	static void validateCertificatePushOptions(List<String> certPushOptions,
+			List<String> postCommandPushOptions, List<ReceiveCommand> commands) {
+		List<String> postOptions = postCommandPushOptions == null
+				? Collections.emptyList()
+				: postCommandPushOptions;
+		if (!Objects.equals(certPushOptions, postOptions)) {
+			// Mark all commands as rejected like in C Git.
+			for (ReceiveCommand cmd : commands) {
+				cmd.setResult(Result.REJECTED_OTHER_REASON,
+						JGitText.get().pushCertificateInconsistentPushOptions);
+			}
+		}
 	}
 
 	/**
@@ -2146,22 +2135,6 @@ public class ReceivePack {
 	 */
 	public void setUnpackErrorHandler(UnpackErrorHandler unpackErrorHandler) {
 		this.unpackErrorHandler = unpackErrorHandler;
-	}
-
-	/**
-	 * Set whether this class will report command failures as warning messages
-	 * before sending the command results.
-	 *
-	 * @param echo
-	 *            if true this class will report command failures as warning
-	 *            messages before sending the command results. This is usually
-	 *            not necessary, but may help buggy Git clients that discard the
-	 *            errors when all branches fail.
-	 * @deprecated no widely used Git versions need this any more
-	 */
-	@Deprecated
-	public void setEchoCommandFailures(boolean echo) {
-		// No-op.
 	}
 
 	/**

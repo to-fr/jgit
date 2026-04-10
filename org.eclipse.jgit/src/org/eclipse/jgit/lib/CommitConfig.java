@@ -97,11 +97,11 @@ public class CommitConfig {
 
 	private final static Charset DEFAULT_COMMIT_MESSAGE_ENCODING = StandardCharsets.UTF_8;
 
-	private String i18nCommitEncoding;
+	private final String i18nCommitEncoding;
 
-	private String commitTemplatePath;
+	private final String commitTemplatePath;
 
-	private CleanupMode cleanupMode;
+	private final CleanupMode cleanupMode;
 
 	private char commentCharacter = '#';
 
@@ -119,7 +119,7 @@ public class CommitConfig {
 		if (!StringUtils.isEmptyOrNull(comment)) {
 			if ("auto".equalsIgnoreCase(comment)) { //$NON-NLS-1$
 				autoCommentChar = true;
-			} else {
+			} else if (comment != null) {
 				char first = comment.charAt(0);
 				if (first > ' ' && first < 127) {
 					commentCharacter = first;

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011, Robin Rosenberg and others
+ * Copyright (C) 2011, 2024 Robin Rosenberg and others
  *
  * This program and the accompanying materials are made available under the
  * terms of the Eclipse Distribution License v. 1.0 which is available at
@@ -9,6 +9,8 @@
  */
 package org.eclipse.jgit.api;
 
+import static org.eclipse.jgit.lib.ConfigConstants.CONFIG_KEY_CONFLICTSTYLE;
+import static org.eclipse.jgit.lib.ConfigConstants.CONFIG_MERGE_SECTION;
 import static org.eclipse.jgit.lib.Constants.OBJECT_ID_ABBREV_STRING_LENGTH;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -20,6 +22,7 @@ import java.io.File;
 import java.io.IOException;
 import java.util.Iterator;
 
+import org.eclipse.jgit.api.MergeCommand.ConflictStyle;
 import org.eclipse.jgit.api.MergeResult.MergeStatus;
 import org.eclipse.jgit.api.ResetCommand.ResetType;
 import org.eclipse.jgit.api.errors.GitAPIException;
@@ -29,6 +32,7 @@ import org.eclipse.jgit.junit.RepositoryTestCase;
 import org.eclipse.jgit.lib.ConfigConstants;
 import org.eclipse.jgit.lib.Constants;
 import org.eclipse.jgit.lib.FileMode;
+import org.eclipse.jgit.lib.RefDatabase;
 import org.eclipse.jgit.lib.ReflogReader;
 import org.eclipse.jgit.lib.RepositoryState;
 import org.eclipse.jgit.merge.ResolveMerger.MergeFailureReason;
@@ -59,7 +63,9 @@ public class RevertCommandTest extends RepositoryTestCase {
 			writeTrashFile("a",
 					"first line\nsecond line\nthird line\nfourth line\n");
 			git.add().addFilepattern("a").call();
-			RevCommit fixingA = git.commit().setMessage("fixed a").call();
+			// Commit message with a non-empty second line on purpose
+			RevCommit fixingA = git.commit().setMessage("fixed a\nsecond line")
+					.call();
 
 			writeTrashFile("b", "first line\n");
 			git.add().addFilepattern("b").call();
@@ -78,16 +84,18 @@ public class RevertCommandTest extends RepositoryTestCase {
 					+ "This reverts commit " + fixingA.getId().getName() + ".\n";
 			assertEquals(expectedMessage, revertCommit.getFullMessage());
 			assertEquals("fixed b", history.next().getFullMessage());
-			assertEquals("fixed a", history.next().getFullMessage());
+			assertEquals("fixed a\nsecond line",
+					history.next().getFullMessage());
 			assertEquals("enlarged a", history.next().getFullMessage());
 			assertEquals("create b", history.next().getFullMessage());
 			assertEquals("create a", history.next().getFullMessage());
 			assertFalse(history.hasNext());
 
-			ReflogReader reader = db.getReflogReader(Constants.HEAD);
+			RefDatabase refDb = db.getRefDatabase();
+			ReflogReader reader = refDb.getReflogReader(Constants.HEAD);
 			assertTrue(reader.getLastEntry().getComment()
 					.startsWith("revert: Revert \""));
-			reader = db.getReflogReader(db.getBranch());
+			reader = refDb.getReflogReader(db.getFullBranch());
 			assertTrue(reader.getLastEntry().getComment()
 					.startsWith("revert: Revert \""));
 		}
@@ -167,10 +175,11 @@ public class RevertCommandTest extends RepositoryTestCase {
 			assertEquals("add first", history.next().getFullMessage());
 			assertFalse(history.hasNext());
 
-			ReflogReader reader = db.getReflogReader(Constants.HEAD);
+			RefDatabase refDb = db.getRefDatabase();
+			ReflogReader reader = refDb.getReflogReader(Constants.HEAD);
 			assertTrue(reader.getLastEntry().getComment()
 					.startsWith("revert: Revert \""));
-			reader = db.getReflogReader(db.getBranch());
+			reader = refDb.getReflogReader(db.getFullBranch());
 			assertTrue(reader.getLastEntry().getComment()
 					.startsWith("revert: Revert \""));
 		}
@@ -220,10 +229,11 @@ public class RevertCommandTest extends RepositoryTestCase {
 			assertEquals("add first", history.next().getFullMessage());
 			assertFalse(history.hasNext());
 
-			ReflogReader reader = db.getReflogReader(Constants.HEAD);
+			RefDatabase refDb = db.getRefDatabase();
+			ReflogReader reader = refDb.getReflogReader(Constants.HEAD);
 			assertTrue(reader.getLastEntry().getComment()
 					.startsWith("revert: Revert \""));
-			reader = db.getReflogReader(db.getBranch());
+			reader = refDb.getReflogReader(db.getFullBranch());
 			assertTrue(reader.getLastEntry().getComment()
 					.startsWith("revert: Revert \""));
 		}
@@ -370,6 +380,25 @@ public class RevertCommandTest extends RepositoryTestCase {
 	}
 
 	@Test
+	public void testRevertConflictMarkersDiff3() throws Exception {
+		try (Git git = new Git(db)) {
+			RevCommit sideCommit = prepareRevert(git);
+
+			db.getConfig().setEnum(CONFIG_MERGE_SECTION, null,
+					CONFIG_KEY_CONFLICTSTYLE, ConflictStyle.DIFF3);
+
+			RevertCommand revert = git.revert();
+			RevCommit newHead = revert.include(sideCommit.getId()).call();
+			assertNull(newHead);
+			MergeResult result = revert.getFailingResult();
+			assertEquals(MergeStatus.CONFLICTING, result.getMergeStatus());
+
+			String expected = "<<<<<<< master\na(latest)\n||||||| BASE\na(previous)\n=======\na\n>>>>>>> ca96c31 second master\n";
+			checkFile(new File(db.getWorkTree(), "a"), expected);
+		}
+	}
+
+	@Test
 	public void testRevertOurCommitName() throws Exception {
 		try (Git git = new Git(db)) {
 			RevCommit sideCommit = prepareRevert(git);
@@ -428,12 +457,13 @@ public class RevertCommandTest extends RepositoryTestCase {
 		assertEquals(RepositoryState.SAFE, db.getRepositoryState());
 
 		if (reason == null) {
-			ReflogReader reader = db.getReflogReader(Constants.HEAD);
-			assertTrue(reader.getLastEntry().getComment()
-					.startsWith("revert: "));
-			reader = db.getReflogReader(db.getBranch());
-			assertTrue(reader.getLastEntry().getComment()
-					.startsWith("revert: "));
+			RefDatabase refDb = db.getRefDatabase();
+			ReflogReader reader = refDb.getReflogReader(Constants.HEAD);
+			assertTrue(
+					reader.getLastEntry().getComment().startsWith("revert: "));
+			reader = refDb.getReflogReader(db.getFullBranch());
+			assertTrue(
+					reader.getLastEntry().getComment().startsWith("revert: "));
 		}
 	}
 }

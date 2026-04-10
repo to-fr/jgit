@@ -17,6 +17,8 @@ import static org.eclipse.jgit.internal.storage.pack.PackExt.PACK;
 import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.io.InputStream;
+import java.nio.file.Files;
 import java.text.MessageFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -24,6 +26,8 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.EnumMap;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -41,10 +45,12 @@ import org.eclipse.jgit.internal.storage.pack.PackWriter;
 import org.eclipse.jgit.lib.AbbreviatedObjectId;
 import org.eclipse.jgit.lib.AnyObjectId;
 import org.eclipse.jgit.lib.Config;
-import org.eclipse.jgit.lib.ConfigConstants;
+import org.eclipse.jgit.lib.CoreConfig;
+import org.eclipse.jgit.lib.CoreConfig.TrustStat;
 import org.eclipse.jgit.lib.ObjectId;
 import org.eclipse.jgit.lib.ObjectLoader;
 import org.eclipse.jgit.util.FileUtils;
+import org.eclipse.jgit.util.Iterators;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -71,7 +77,7 @@ class PackDirectory {
 
 	private final AtomicReference<PackList> packList;
 
-	private final boolean trustFolderStat;
+	private final TrustStat trustPackStat;
 
 	/**
 	 * Initialize a reference to an on-disk 'pack' directory.
@@ -85,14 +91,7 @@ class PackDirectory {
 		this.config = config;
 		this.directory = directory;
 		packList = new AtomicReference<>(NO_PACKS);
-
-		// Whether to trust the pack folder's modification time. If set to false
-		// we will always scan the .git/objects/pack folder to check for new
-		// pack files. If set to true (default) we use the folder's size,
-		// modification time, and key (inode) and assume that no new pack files
-		// can be in this folder if these attributes have not changed.
-		trustFolderStat = config.getBoolean(ConfigConstants.CONFIG_CORE_SECTION,
-				ConfigConstants.CONFIG_KEY_TRUSTFOLDERSTAT, true);
+		trustPackStat = config.get(CoreConfig.KEY).getTrustPackStat();
 	}
 
 	/**
@@ -111,9 +110,7 @@ class PackDirectory {
 	void close() {
 		PackList packs = packList.get();
 		if (packs != NO_PACKS && packList.compareAndSet(packs, NO_PACKS)) {
-			for (Pack p : packs.packs) {
-				p.close();
-			}
+			Pack.close(Set.of(packs.packs));
 		}
 	}
 
@@ -280,12 +277,14 @@ class PackDirectory {
 		PackList pList = packList.get();
 		int retries = 0;
 		SEARCH: for (;;) {
-			for (Pack p : pList.packs) {
+			for (Pack p : pList.inReverse()) {
 				try {
 					LocalObjectRepresentation rep = p.representation(curs, otp);
 					p.resetTransientErrorCount();
 					if (rep != null) {
-						packer.select(otp, rep);
+						if (!packer.select(otp, rep)) {
+							return;
+						}
 						packer.checkSearchForReuseTimeout();
 					}
 				} catch (SearchForReuseTimeout e) {
@@ -314,41 +313,53 @@ class PackDirectory {
 	}
 
 	private void handlePackError(IOException e, Pack p) {
-		String warnTmpl = null;
-		int transientErrorCount = 0;
-		String errTmpl = JGitText.get().exceptionWhileReadingPack;
-		if ((e instanceof CorruptObjectException)
-				|| (e instanceof PackInvalidException)) {
-			warnTmpl = JGitText.get().corruptPack;
-			LOG.warn(MessageFormat.format(warnTmpl,
-					p.getPackFile().getAbsolutePath()), e);
-			// Assume the pack is corrupted, and remove it from the list.
-			remove(p);
-		} else if (e instanceof FileNotFoundException) {
-			if (p.getPackFile().exists()) {
-				errTmpl = JGitText.get().packInaccessible;
-				transientErrorCount = p.incrementTransientErrorCount();
-			} else {
-				warnTmpl = JGitText.get().packWasDeleted;
-				remove(p);
-			}
+		Throwable cause = e.getCause();
+		if (e instanceof FileNotFoundException
+				|| cause instanceof FileNotFoundException) {
+			handleFileNotFound(e, p);
+		} else if (e instanceof CorruptObjectException
+				|| e instanceof PackInvalidException) {
+			handleCorruptPack(e, p);
 		} else if (FileUtils.isStaleFileHandleInCausalChain(e)) {
-			warnTmpl = JGitText.get().packHandleIsStale;
-			remove(p);
+			handleStaleFileHandle(e, p);
 		} else {
-			transientErrorCount = p.incrementTransientErrorCount();
+			handleTransientError(e, p,
+					JGitText.get().exceptionWhileReadingPack);
 		}
-		if (warnTmpl != null) {
-			LOG.warn(MessageFormat.format(warnTmpl,
-					p.getPackFile().getAbsolutePath()), e);
+	}
+
+	private void handleFileNotFound(IOException e, Pack p) {
+		if (p.getPackFile().exists()) {
+			handleTransientError(e, p, JGitText.get().packInaccessible);
 		} else {
-			if (doLogExponentialBackoff(transientErrorCount)) {
-				// Don't remove the pack from the list, as the error may be
-				// transient.
-				LOG.error(MessageFormat.format(errTmpl,
-						p.getPackFile().getAbsolutePath(),
-						Integer.valueOf(transientErrorCount)), e);
+			if (LOG.isDebugEnabled()) {
+				LOG.debug(MessageFormat.format(JGitText.get().packWasDeleted,
+						p.getPackFile().getAbsolutePath()), e);
 			}
+			remove(p);
+		}
+	}
+
+	private void handleCorruptPack(IOException e, Pack p) {
+		LOG.warn(MessageFormat.format(JGitText.get().corruptPack,
+				p.getPackFile().getAbsolutePath()), e);
+		// Assume the pack is corrupted, and remove it from the list.
+		remove(p);
+	}
+
+	private void handleStaleFileHandle(IOException e, Pack p) {
+		LOG.warn(MessageFormat.format(JGitText.get().packHandleIsStale,
+				p.getPackFile().getAbsolutePath()), e);
+		remove(p);
+	}
+
+	private void handleTransientError(IOException e, Pack p,
+			String errorTemplate) {
+		int transientErrorCount = p.incrementTransientErrorCount();
+		if (doLogExponentialBackoff(transientErrorCount)) {
+			LOG.error(MessageFormat.format(errorTemplate,
+					p.getPackFile().getAbsolutePath(),
+					Integer.valueOf(transientErrorCount)), e);
 		}
 	}
 
@@ -362,8 +373,26 @@ class PackDirectory {
 	}
 
 	boolean searchPacksAgain(PackList old) {
-		return (!trustFolderStat || old.snapshot.isModified(directory))
-				&& old != scanPacks(old);
+		switch (trustPackStat) {
+		case NEVER:
+			break;
+		case AFTER_OPEN:
+			try (InputStream stream = Files
+					.newInputStream(directory.toPath())) {
+				// open the pack directory to refresh attributes (on some NFS clients)
+			} catch (IOException e) {
+				// ignore
+			}
+			//$FALL-THROUGH$
+		case ALWAYS:
+			if (!old.snapshot.isModified(directory)) {
+				return false;
+			}
+			break;
+		case INHERIT:
+			// only used in CoreConfig internally
+		}
+		return old != scanPacks(old);
 	}
 
 	void insert(Pack pack) {
@@ -460,12 +489,9 @@ class PackDirectory {
 					&& !oldPack.getFileSnapshot().isModified(packFile)) {
 				forReuse.remove(packFile.getName());
 				list.add(oldPack);
-				try {
-					if(oldPack.getBitmapIndex() == null) {
-						oldPack.refreshBitmapIndex(packFilesByExt.get(BITMAP_INDEX));
-					}
-				} catch (IOException e) {
-					LOG.warn(JGitText.get().bitmapAccessErrorForPackfile, oldPack.getPackName(), e);
+				PackFile bitMaps = packFilesByExt.get(BITMAP_INDEX);
+				if (bitMaps != null) {
+					oldPack.setBitmapIndexFile(bitMaps);
 				}
 				continue;
 			}
@@ -484,9 +510,7 @@ class PackDirectory {
 			return old;
 		}
 
-		for (Pack p : forReuse.values()) {
-			p.close();
-		}
+		Pack.close(new HashSet<>(forReuse.values()));
 
 		if (list.isEmpty()) {
 			return new PackList(snapshot, NO_PACKS.packs);
@@ -545,7 +569,7 @@ class PackDirectory {
 		for (String name : nameList) {
 			try {
 				PackFile pack = new PackFile(directory, name);
-				if (pack.getPackExt() != null) {
+				if (pack.getPackExt() != null && !pack.isTmpGCFile()) {
 					Map<PackExt, PackFile> packByExt = packFilesByExtById
 							.get(pack.getId());
 					if (packByExt == null) {
@@ -571,6 +595,14 @@ class PackDirectory {
 		PackList(FileSnapshot monitor, Pack[] packs) {
 			this.snapshot = monitor;
 			this.packs = packs;
+		}
+
+		Iterable<Pack> inReverse() {
+			return Iterators.iterable(reverseIterator());
+		}
+
+		Iterator<Pack> reverseIterator() {
+			return Iterators.reverseIterator(packs);
 		}
 	}
 }

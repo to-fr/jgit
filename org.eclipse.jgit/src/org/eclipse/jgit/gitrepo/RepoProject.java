@@ -39,6 +39,7 @@ public class RepoProject implements Comparable<RepoProject> {
 	private final List<CopyFile> copyfiles;
 	private final List<LinkFile> linkfiles;
 	private String upstream;
+	private String destBranch;
 	private String recommendShallow;
 	private String url;
 	private String defaultRevision;
@@ -395,10 +396,21 @@ public class RepoProject implements Comparable<RepoProject> {
 	 *
 	 * @return the upstream value if present, null otherwise.
 	 *
-	 * @since 7.0
+	 * @since 6.10
 	 */
 	public String getUpstream() {
 		return this.upstream;
+	}
+
+	/**
+	 * Return the dest-branch attribute of the project
+	 *
+	 * @return the dest-branch value if present, null otherwise.
+	 *
+	 * @since 6.10
+	 */
+	public String getDestBranch() {
+		return this.destBranch;
 	}
 
 	/**
@@ -410,10 +422,24 @@ public class RepoProject implements Comparable<RepoProject> {
 	 * @param upstream
 	 *            value of the attribute in the manifest
 	 *
-	 * @since 7.0
+	 * @since 6.10
 	 */
-	void setUpstream(String upstream) {
+	public void setUpstream(String upstream) {
 		this.upstream = upstream;
+	}
+
+	/**
+	 * Set the dest-branch attribute of the project
+	 *
+	 * Name of a Git branch.
+	 *
+	 * @param destBranch
+	 *            value of the attribute in the manifest
+	 *
+	 * @since 6.10
+	 */
+	public void setDestBranch(String destBranch) {
+		this.destBranch = destBranch;
 	}
 
 	private String getPathWithSlash() {

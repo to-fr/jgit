@@ -11,6 +11,8 @@ package org.eclipse.jgit.merge;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.time.Instant.EPOCH;
+import static org.eclipse.jgit.lib.ConfigConstants.CONFIG_KEY_CONFLICTSTYLE;
+import static org.eclipse.jgit.lib.ConfigConstants.CONFIG_MERGE_SECTION;
 import static org.eclipse.jgit.lib.Constants.OBJ_BLOB;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -30,6 +32,7 @@ import java.util.Map;
 import java.util.Set;
 
 import org.eclipse.jgit.api.Git;
+import org.eclipse.jgit.api.MergeCommand.ConflictStyle;
 import org.eclipse.jgit.api.MergeResult;
 import org.eclipse.jgit.api.MergeResult.MergeStatus;
 import org.eclipse.jgit.api.RebaseResult;
@@ -964,6 +967,39 @@ public class MergerTest extends RepositoryTestCase {
 	}
 
 	@Theory
+	public void checkContentMergeConflictDiff3(MergeStrategy strategy)
+			throws Exception {
+		Git git = Git.wrap(db);
+
+		writeTrashFile("file", "1\n2\n3");
+		git.add().addFilepattern("file").call();
+		RevCommit first = git.commit().setMessage("added file").call();
+
+		writeTrashFile("file", "1master\n2\n3");
+		git.commit().setAll(true).setMessage("modified file on master").call();
+
+		git.checkout().setCreateBranch(true).setStartPoint(first)
+				.setName("side").call();
+		writeTrashFile("file", "1side\n2\n3");
+		RevCommit sideCommit = git.commit().setAll(true)
+				.setMessage("modified file on side").call();
+
+		git.checkout().setName("master").call();
+
+		db.getConfig().setEnum(CONFIG_MERGE_SECTION, null,
+				CONFIG_KEY_CONFLICTSTYLE, ConflictStyle.DIFF3);
+
+		MergeResult result = git.merge().setStrategy(strategy)
+				.include(sideCommit).call();
+		assertEquals(MergeStatus.CONFLICTING, result.getMergeStatus());
+		String expected = "<<<<<<< HEAD\n" + "1master\n" + "||||||| BASE\n"
+				+ "1\n" + "=======\n" + "1side\n" + ">>>>>>> "
+				+ sideCommit.name() + "\n" + "2\n"
+				+ "3";
+		assertEquals(expected, read("file"));
+	}
+
+	@Theory
 	public void checkContentMergeConflict_noTree(MergeStrategy strategy)
 			throws Exception {
 		Git git = Git.wrap(db);
@@ -1792,7 +1828,77 @@ public class MergerTest extends RepositoryTestCase {
 		// children
 		mergeResult = git.merge().include(commitC3S).call();
 		assertEquals(mergeResult.getMergeStatus(), MergeStatus.MERGED);
+	}
 
+	/**
+	 * Merging two commits when binary files have equal content, but conflicting content in the
+	 * virtual ancestor.
+	 *
+	 * <p>
+	 * This test has the same set up as
+	 * {@code checkFileDirMergeConflictInVirtualAncestor_NoConflictInChildren}, only
+	 * with the content conflict in A1 and A2.
+	 */
+	@Theory
+	public void checkBinaryMergeConflictInVirtualAncestor(MergeStrategy strategy) throws Exception {
+		if (!strategy.equals(MergeStrategy.RECURSIVE)) {
+			return;
+		}
+
+		Git git = Git.wrap(db);
+
+		// master
+		writeTrashFile("c", "initial file");
+		git.add().addFilepattern("c").call();
+		RevCommit commitI = git.commit().setMessage("Initial commit").call();
+
+		writeTrashFile("a", "\0\1\1\1\1\0");  // content in Ancestor 1
+		git.add().addFilepattern("a").call();
+		RevCommit commitA1 = git.commit().setMessage("Ancestor 1").call();
+
+		writeTrashFile("a", "\0\1\2\3\4\5\0");  // content in Child 1 (commited on master)
+		git.add().addFilepattern("a").call();
+		// commit C1M
+		git.commit().setMessage("Child 1 on master").call();
+
+		git.checkout().setCreateBranch(true).setStartPoint(commitI).setName("branch-to-merge").call();
+		writeTrashFile("a", "\0\2\2\2\2\0");  // content in Ancestor 1
+		git.add().addFilepattern("a").call();
+		RevCommit commitA2 = git.commit().setMessage("Ancestor 2").call();
+
+		// second branch
+		git.checkout().setCreateBranch(true).setStartPoint(commitA1).setName("second-branch").call();
+		writeTrashFile("a", "\0\5\4\3\2\1\0");  // content in Child 2 (commited on second-branch)
+		git.add().addFilepattern("a").call();
+		// commit C2S
+		git.commit().setMessage("Child 2 on second-branch").call();
+
+		// Merge branch-to-merge into second-branch
+		MergeResult mergeResult = git.merge().include(commitA2).setStrategy(strategy).call();
+		assertEquals(mergeResult.getNewHead(), null);
+		assertEquals(mergeResult.getMergeStatus(), MergeStatus.CONFLICTING);
+		// Resolve the conflict manually
+		writeTrashFile("a", "\0\3\3\3\3\0");  // merge conflict resolution
+		git.add().addFilepattern("a").call();
+		RevCommit commitC3S = git.commit().setMessage("Child 3 on second bug - resolve merge conflict").call();
+
+		// Merge branch-to-merge into master
+		git.checkout().setName("master").call();
+		mergeResult = git.merge().include(commitA2).setStrategy(strategy).call();
+		assertEquals(mergeResult.getNewHead(), null);
+		assertEquals(mergeResult.getMergeStatus(), MergeStatus.CONFLICTING);
+
+		// Resolve the conflict manually - set the same value as in resolution above
+		writeTrashFile("a", "\0\3\3\3\3\0");  // merge conflict resolution
+		git.add().addFilepattern("a").call();
+		// commit C4M
+		git.commit().setMessage("Child 4 on master - resolve merge conflict").call();
+
+		// Merge C4M (second-branch) into master (C3S)
+		// Conflict in virtual base should be here, but there are no conflicts in
+		// children
+		mergeResult = git.merge().include(commitC3S).call();
+		assertEquals(mergeResult.getMergeStatus(), MergeStatus.MERGED);
 	}
 
 	/**

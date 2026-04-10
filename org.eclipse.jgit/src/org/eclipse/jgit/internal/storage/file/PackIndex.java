@@ -109,7 +109,7 @@ public interface PackIndex
 	}
 
 	private static boolean isTOC(byte[] h) {
-		final byte[] toc = PackIndexWriter.TOC;
+		final byte[] toc = BasePackIndexWriter.TOC;
 		for (int i = 0; i < toc.length; i++)
 			if (h[i] != toc[i])
 				return false;
@@ -286,7 +286,7 @@ public interface PackIndex
 	 *             the index cannot be read.
 	 */
 	void resolve(Set<ObjectId> matches, AbbreviatedObjectId id,
-			int matchLimit) throws IOException;
+				 int matchLimit) throws IOException;
 
 	/**
 	 * Get pack checksum
@@ -302,8 +302,10 @@ public interface PackIndex
 	 *
 	 */
 	class MutableEntry {
+		/** Buffer of the ObjectId visited by the EntriesIterator. */
 		final MutableObjectId idBuffer = new MutableObjectId();
 
+		/** Offset into the packfile of the current object. */
 		long offset;
 
 		/**
@@ -321,7 +323,6 @@ public interface PackIndex
 		 * @return hex string describing the object id of this entry.
 		 */
 		public String name() {
-			ensureId();
 			return idBuffer.name();
 		}
 
@@ -331,7 +332,6 @@ public interface PackIndex
 		 * @return a copy of the object id.
 		 */
 		public ObjectId toObjectId() {
-			ensureId();
 			return idBuffer.toObjectId();
 		}
 
@@ -342,14 +342,37 @@ public interface PackIndex
 		 */
 		public MutableEntry cloneEntry() {
 			final MutableEntry r = new MutableEntry();
-			ensureId();
 			r.idBuffer.fromObjectId(idBuffer);
 			r.offset = offset;
 			return r;
 		}
 
-		void ensureId() {
-			// Override in implementations.
+		/**
+		 * Similar to {@link Comparable#compareTo(Object)}, using only the
+		 * object id in the entry.
+		 *
+		 * @param other
+		 *            Another mutable entry (probably from another index)
+		 *
+		 * @return a negative integer, zero, or a positive integer as this
+		 *         object is less than, equal to, or greater than the specified
+		 *         object.
+		 */
+		public int compareBySha1To(MutableEntry other) {
+			return idBuffer.compareTo(other.idBuffer);
+		}
+
+		/**
+		 * Copy the current ObjectId to dest
+		 * <p>
+		 * Like {@link #toObjectId()}, but reusing the destination instead of
+		 * creating a new ObjectId instance.
+		 *
+		 * @param dest
+		 *            destination for the object id
+		 */
+		public void copyOidTo(MutableObjectId dest) {
+			dest.fromObjectId(idBuffer);
 		}
 	}
 
@@ -357,17 +380,22 @@ public interface PackIndex
 	 * Base implementation of the iterator over index entries.
 	 */
 	abstract class EntriesIterator implements Iterator<MutableEntry> {
-		protected final MutableEntry entry = initEntry();
-
 		private final long objectCount;
 
+		private final MutableEntry entry = new MutableEntry();
+
+		/** Counts number of entries accessed so far. */
+		private long returnedNumber = 0;
+
+		/**
+		 * Construct an iterator that can move objectCount times forward.
+		 *
+		 * @param objectCount
+		 *            the number of objects in the PackFile.
+		 */
 		protected EntriesIterator(long objectCount) {
 			this.objectCount = objectCount;
 		}
-
-		protected long returnedNumber = 0;
-
-		protected abstract MutableEntry initEntry();
 
 		@Override
 		public boolean hasNext() {
@@ -379,7 +407,55 @@ public interface PackIndex
 		 * element.
 		 */
 		@Override
-		public abstract MutableEntry next();
+		public MutableEntry next() {
+			readNext();
+			returnedNumber++;
+			return entry;
+		}
+
+		/**
+		 * Used by subclasses to load the next entry into the MutableEntry.
+		 * <p>
+		 * Subclasses are expected to populate the entry with
+		 * {@link #setIdBuffer} and {@link #setOffset}.
+		 */
+		protected abstract void readNext();
+
+		/**
+		 * Copies to the entry an {@link ObjectId} from the int buffer and
+		 * position idx
+		 *
+		 * @param raw
+		 *            the raw data
+		 * @param idx
+		 *            the index into {@code raw}
+		 */
+		protected void setIdBuffer(int[] raw, int idx) {
+			entry.idBuffer.fromRaw(raw, idx);
+		}
+
+		/**
+		 * Copies to the entry an {@link ObjectId} from the byte array at
+		 * position idx.
+		 *
+		 * @param raw
+		 *            the raw data
+		 * @param idx
+		 *            the index into {@code raw}
+		 */
+		protected void setIdBuffer(byte[] raw, int idx) {
+			entry.idBuffer.fromRaw(raw, idx);
+		}
+
+		/**
+		 * Sets the {@code offset} to the entry
+		 *
+		 * @param offset
+		 *            the offset in the pack file
+		 */
+		protected void setOffset(long offset) {
+			entry.offset = offset;
+		}
 
 		@Override
 		public void remove() {

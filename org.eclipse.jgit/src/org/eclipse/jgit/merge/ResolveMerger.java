@@ -16,9 +16,12 @@ package org.eclipse.jgit.merge;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.time.Instant.EPOCH;
+import static org.eclipse.jgit.api.MergeCommand.ConflictStyle.MERGE;
 import static org.eclipse.jgit.diff.DiffAlgorithm.SupportedAlgorithm.HISTOGRAM;
 import static org.eclipse.jgit.lib.ConfigConstants.CONFIG_DIFF_SECTION;
 import static org.eclipse.jgit.lib.ConfigConstants.CONFIG_KEY_ALGORITHM;
+import static org.eclipse.jgit.lib.ConfigConstants.CONFIG_KEY_CONFLICTSTYLE;
+import static org.eclipse.jgit.lib.ConfigConstants.CONFIG_MERGE_SECTION;
 import static org.eclipse.jgit.lib.Constants.OBJ_BLOB;
 
 import java.io.Closeable;
@@ -39,8 +42,10 @@ import java.util.TreeMap;
 
 import org.eclipse.jgit.annotations.NonNull;
 import org.eclipse.jgit.annotations.Nullable;
+import org.eclipse.jgit.api.MergeCommand.ConflictStyle;
 import org.eclipse.jgit.attributes.Attribute;
 import org.eclipse.jgit.attributes.Attributes;
+import org.eclipse.jgit.attributes.AttributesNodeProvider;
 import org.eclipse.jgit.diff.DiffAlgorithm;
 import org.eclipse.jgit.diff.DiffAlgorithm.SupportedAlgorithm;
 import org.eclipse.jgit.diff.RawText;
@@ -830,12 +835,21 @@ public class ResolveMerger extends ThreeWayMerger {
 	 */
 	protected MergeAlgorithm mergeAlgorithm;
 
+	private ConflictStyle conflictStyle;
+
 	/**
 	 * The {@link ContentMergeStrategy} to use for "resolve" and "recursive"
 	 * merges.
 	 */
 	@NonNull
 	private ContentMergeStrategy contentStrategy = ContentMergeStrategy.CONFLICT;
+
+	/**
+	 * The {@link AttributesNodeProvider} to use while merging trees.
+	 *
+	 * @since 6.10.1
+	 */
+	protected AttributesNodeProvider attributesNodeProvider;
 
 	private static MergeAlgorithm getMergeAlgorithm(Config config) {
 		SupportedAlgorithm diffAlg = config.getEnum(
@@ -862,6 +876,7 @@ public class ResolveMerger extends ThreeWayMerger {
 		super(local);
 		Config config = local.getConfig();
 		mergeAlgorithm = getMergeAlgorithm(config);
+		conflictStyle = getConflictStyle(config);
 		commitNames = defaultCommitNames();
 		this.inCore = inCore;
 	}
@@ -888,6 +903,7 @@ public class ResolveMerger extends ThreeWayMerger {
 	protected ResolveMerger(ObjectInserter inserter, Config config) {
 		super(inserter);
 		mergeAlgorithm = getMergeAlgorithm(config);
+		conflictStyle = getConflictStyle(config);
 		commitNames = defaultCommitNames();
 		inCore = true;
 	}
@@ -913,6 +929,23 @@ public class ResolveMerger extends ThreeWayMerger {
 	public void setContentMergeStrategy(ContentMergeStrategy strategy) {
 		contentStrategy = strategy == null ? ContentMergeStrategy.CONFLICT
 				: strategy;
+	}
+
+	/**
+	 * Sets the conflict style to be used when formatting merge conflicts.
+	 *
+	 * @param conflictStyle
+	 *            a {@link org.eclipse.jgit.api.MergeCommand.ConflictStyle}
+	 * @since 7.6
+	 */
+	public void setConflictStyle(ConflictStyle conflictStyle) {
+		this.conflictStyle = conflictStyle;
+	}
+
+	private ConflictStyle getConflictStyle(Config config) {
+		return config.getEnum(CONFIG_MERGE_SECTION,
+				null,
+				CONFIG_KEY_CONFLICTSTYLE, MERGE);
 	}
 
 	@Override
@@ -1273,6 +1306,13 @@ public class ResolveMerger extends ThreeWayMerger {
 					default:
 						break;
 				}
+				if (ignoreConflicts) {
+					// If the path is selected to be treated as binary via attributes, we do not perform
+					// content merge. When ignoreConflicts = true, we simply keep OURS to allow virtual commit
+					// to be built.
+					keep(ourDce);
+					return true;
+				}
 				// add the conflicting path to merge result
 				String currentPath = tw.getPathString();
 				MergeResult<RawText> result = new MergeResult<>(
@@ -1312,8 +1352,12 @@ public class ResolveMerger extends ThreeWayMerger {
 					addToCheckout(currentPath, null, attributes);
 					return true;
 				} catch (BinaryBlobException e) {
-					// if the file is binary in either OURS, THEIRS or BASE
-					// here, we don't have an option to ignore conflicts
+					// The file is binary in either OURS, THEIRS or BASE
+					if (ignoreConflicts) {
+						// When ignoreConflicts = true, we simply keep OURS to allow virtual commit to be built.
+						keep(ourDce);
+						return true;
+					}
 				}
 			}
 			switch (getContentMergeStrategy()) {
@@ -1354,6 +1398,8 @@ public class ResolveMerger extends ThreeWayMerger {
 					}
 				}
 			} else {
+				// This is reachable if contentMerge() call above threw BinaryBlobException, so we don't
+				// need to check ignoreConflicts here, since it's already handled above.
 				result.setContainsConflicts(true);
 				addConflict(base, ours, theirs);
 				unmergedPaths.add(currentPath);
@@ -1489,9 +1535,24 @@ public class ResolveMerger extends ThreeWayMerger {
 				: getRawText(ours.getEntryObjectId(), attributes[T_OURS]);
 		RawText theirsText = theirs == null ? RawText.EMPTY_TEXT
 				: getRawText(theirs.getEntryObjectId(), attributes[T_THEIRS]);
-		mergeAlgorithm.setContentMergeStrategy(strategy);
+		mergeAlgorithm.setContentMergeStrategy(
+				getAttributesContentMergeStrategy(attributes[T_OURS],
+						strategy));
 		return mergeAlgorithm.merge(RawTextComparator.DEFAULT, baseText,
 				ourText, theirsText);
+	}
+
+	private ContentMergeStrategy getAttributesContentMergeStrategy(
+			Attributes attributes, ContentMergeStrategy strategy) {
+		Attribute attr = attributes.get(Constants.ATTR_MERGE);
+		if (attr != null) {
+			String attrValue = attr.getValue();
+			if (attrValue != null && attrValue
+					.equals(Constants.ATTR_BUILTIN_UNION_MERGE_DRIVER)) {
+				return ContentMergeStrategy.UNION;
+			}
+		}
+		return strategy;
 	}
 
 	private boolean isIndexDirty() {
@@ -1632,8 +1693,16 @@ public class ResolveMerger extends ThreeWayMerger {
 				db != null ? nonNullRepo().getDirectory() : null, workTreeUpdater.getInCoreFileSizeLimit());
 		boolean success = false;
 		try {
-			new MergeFormatter().formatMerge(buf, result,
-					Arrays.asList(commitNames), UTF_8);
+			switch (conflictStyle) {
+			case MERGE:
+				new MergeFormatter().formatMerge(buf, result,
+						Arrays.asList(commitNames), UTF_8);
+				break;
+			case DIFF3:
+				new MergeFormatter().formatMergeDiff3(buf, result,
+						Arrays.asList(commitNames), UTF_8);
+				break;
+			}
 			buf.close();
 			success = true;
 		} finally {
@@ -1824,6 +1893,18 @@ public class ResolveMerger extends ThreeWayMerger {
 		this.workingTreeIterator = workingTreeIterator;
 	}
 
+	/**
+	 * Sets the {@link AttributesNodeProvider} to be used by this merger.
+	 *
+	 * @param attributesNodeProvider
+	 *            the attributeNodeProvider to set
+	 * @since 6.10.1
+	 */
+	public void setAttributesNodeProvider(
+			AttributesNodeProvider attributesNodeProvider) {
+		this.attributesNodeProvider = attributesNodeProvider;
+	}
+
 
 	/**
 	 * The resolve conflict way of three way merging
@@ -1868,6 +1949,9 @@ public class ResolveMerger extends ThreeWayMerger {
 					WorkTreeUpdater.createWorkTreeUpdater(db, dircache);
 			dircache = workTreeUpdater.getLockedDirCache();
 			tw = new NameConflictTreeWalk(db, reader);
+			if (attributesNodeProvider != null) {
+				tw.setAttributesNodeProvider(attributesNodeProvider);
+			}
 
 			tw.addTree(baseTree);
 			tw.setHead(tw.addTree(headTree));

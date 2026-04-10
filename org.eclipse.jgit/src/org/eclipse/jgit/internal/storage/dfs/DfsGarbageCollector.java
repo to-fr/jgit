@@ -18,13 +18,14 @@ import static org.eclipse.jgit.internal.storage.dfs.DfsObjDatabase.PackSource.RE
 import static org.eclipse.jgit.internal.storage.dfs.DfsObjDatabase.PackSource.UNREACHABLE_GARBAGE;
 import static org.eclipse.jgit.internal.storage.dfs.DfsPackCompactor.configureReftable;
 import static org.eclipse.jgit.internal.storage.pack.PackExt.COMMIT_GRAPH;
-import static org.eclipse.jgit.internal.storage.pack.PackExt.INDEX;
 import static org.eclipse.jgit.internal.storage.pack.PackExt.OBJECT_SIZE_INDEX;
 import static org.eclipse.jgit.internal.storage.pack.PackExt.PACK;
 import static org.eclipse.jgit.internal.storage.pack.PackExt.REFTABLE;
 import static org.eclipse.jgit.internal.storage.pack.PackWriter.NONE;
 
 import java.io.IOException;
+import java.time.Instant;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Calendar;
@@ -33,6 +34,7 @@ import java.util.EnumSet;
 import java.util.GregorianCalendar;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Queue;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
@@ -90,7 +92,7 @@ public class DfsGarbageCollector {
 	private long coalesceGarbageLimit = 50 << 20;
 	private long garbageTtlMillis = TimeUnit.DAYS.toMillis(1);
 
-	private long startTimeMillis;
+	private Instant startTime;
 	private List<DfsPackFile> packsBefore;
 	private List<DfsReftable> reftablesBefore;
 	private List<DfsPackFile> expiredGarbagePacks;
@@ -100,6 +102,7 @@ public class DfsGarbageCollector {
 	private Set<ObjectId> allTags;
 	private Set<ObjectId> nonHeads;
 	private Set<ObjectId> tagTargets;
+	private Instant refLogExpire;
 
 	/**
 	 * Initialize a garbage collector.
@@ -197,6 +200,22 @@ public class DfsGarbageCollector {
 	 */
 	public DfsGarbageCollector setReftableInitialMinUpdateIndex(long u) {
 		reftableInitialMinUpdateIndex = Math.max(u, 0);
+		return this;
+	}
+
+
+	/**
+	 *  Set time limit to the reflog history.
+         *  <p>
+         *  Garbage Collector prunes entries from reflog history older than {@code refLogExpire}
+         *  <p>
+	 *
+	 * @param refLogExpire
+	 *            instant in time which defines refLog expiration
+	 * @return {@code this}
+	 */
+	public DfsGarbageCollector setRefLogExpire(Instant refLogExpire) {
+		this.refLogExpire = refLogExpire;
 		return this;
 	}
 
@@ -335,7 +354,7 @@ public class DfsGarbageCollector {
 			throw new IllegalStateException(
 					JGitText.get().supportOnlyPackIndexVersion2);
 
-		startTimeMillis = SystemReader.getInstance().getCurrentTime();
+		startTime = SystemReader.getInstance().now();
 		ctx = objdb.newReader();
 		try {
 			refdb.refresh();
@@ -414,11 +433,12 @@ public class DfsGarbageCollector {
 	}
 
 	private void readPacksBefore() throws IOException {
-		DfsPackFile[] packs = objdb.getPacks();
-		packsBefore = new ArrayList<>(packs.length);
-		expiredGarbagePacks = new ArrayList<>(packs.length);
+		DfsPackFile[] rawPacks = objdb.getPacks();
+		List<DfsPackFile> packs = getPlainPacks(rawPacks);
+		packsBefore = new ArrayList<>(packs.size());
+		expiredGarbagePacks = new ArrayList<>(packs.size());
 
-		long now = SystemReader.getInstance().getCurrentTime();
+		long now = SystemReader.getInstance().now().toEpochMilli();
 		for (DfsPackFile p : packs) {
 			DfsPackDescription d = p.getPackDescription();
 			if (d.getPackSource() != UNREACHABLE_GARBAGE) {
@@ -429,6 +449,24 @@ public class DfsGarbageCollector {
 				packsBefore.add(p);
 			}
 		}
+	}
+
+	private static List<DfsPackFile> getPlainPacks(DfsPackFile[] packs) {
+		List<DfsPackFile> plainPacks = new ArrayList<>();
+		Queue<DfsPackFile> pending = new ArrayDeque<>(
+				Arrays.stream(packs).toList());
+		while (!pending.isEmpty()) {
+			DfsPackFile pack = pending.poll();
+			if (pack instanceof DfsPackFileMidx midxPack) {
+				plainPacks.addAll(midxPack.getCoveredPacks());
+				if (midxPack.getMultipackIndexBase() != null) {
+					pending.add(midxPack.getMultipackIndexBase());
+				}
+			} else {
+				plainPacks.add(pack);
+			}
+		}
+		return plainPacks;
 	}
 
 	private void readReftablesBefore() throws IOException {
@@ -551,6 +589,7 @@ public class DfsGarbageCollector {
 		for (DfsPackFile pack : expiredGarbagePacks) {
 			toPrune.add(pack.getPackDescription());
 		}
+
 		return toPrune;
 	}
 
@@ -687,14 +726,7 @@ public class DfsGarbageCollector {
 			pack.setBlockSize(PACK, out.blockSize());
 		}
 
-		try (DfsOutputStream out = objdb.writeFile(pack, INDEX)) {
-			CountingOutputStream cnt = new CountingOutputStream(out);
-			pw.writeIndex(cnt);
-			pack.addFileExt(INDEX);
-			pack.setFileSize(INDEX, cnt.getCount());
-			pack.setBlockSize(INDEX, out.blockSize());
-			pack.setIndexVersion(pw.getIndexVersion());
-		}
+		pw.writeIndex(objdb.getPackIndexWriter(pack, pw.getIndexVersion()));
 
 		if (source != UNREACHABLE_GARBAGE && packConfig.getMinBytesForObjSizeIndex() >= 0) {
 			try (DfsOutputStream out = objdb.writeFile(pack,
@@ -713,7 +745,7 @@ public class DfsGarbageCollector {
 
 		PackStatistics stats = pw.getStatistics();
 		pack.setPackStats(stats);
-		pack.setLastModified(startTimeMillis);
+		pack.setLastModified(startTime.toEpochMilli());
 		newPackDesc.add(pack);
 		newPackStats.add(stats);
 		newPackObj.add(pw.getObjectSet());
@@ -741,6 +773,10 @@ public class DfsGarbageCollector {
 			compact.addAll(stack.readers());
 			compact.setIncludeDeletes(includeDeletes);
 			compact.setConfig(configureReftable(reftableConfig, out));
+			if(refLogExpire != null ){
+				compact.setReflogExpireOldestReflogTimeMillis(
+						refLogExpire.toEpochMilli());
+			}
 			compact.compact();
 			pack.addFileExt(REFTABLE);
 			pack.setReftableStats(compact.getStats());

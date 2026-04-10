@@ -41,12 +41,13 @@ import org.eclipse.jgit.errors.CorruptObjectException;
 import org.eclipse.jgit.errors.IncorrectObjectTypeException;
 import org.eclipse.jgit.errors.LargeObjectException;
 import org.eclipse.jgit.internal.JGitText;
+import org.eclipse.jgit.internal.storage.file.BasePackIndexWriter;
 import org.eclipse.jgit.internal.storage.file.PackIndex;
-import org.eclipse.jgit.internal.storage.file.PackIndexWriter;
 import org.eclipse.jgit.internal.storage.file.PackObjectSizeIndexWriter;
 import org.eclipse.jgit.internal.storage.pack.PackExt;
 import org.eclipse.jgit.lib.AbbreviatedObjectId;
 import org.eclipse.jgit.lib.AnyObjectId;
+import org.eclipse.jgit.lib.ConfigConstants;
 import org.eclipse.jgit.lib.Constants;
 import org.eclipse.jgit.lib.ObjectId;
 import org.eclipse.jgit.lib.ObjectIdOwnerMap;
@@ -54,7 +55,6 @@ import org.eclipse.jgit.lib.ObjectInserter;
 import org.eclipse.jgit.lib.ObjectLoader;
 import org.eclipse.jgit.lib.ObjectReader;
 import org.eclipse.jgit.lib.ObjectStream;
-import org.eclipse.jgit.storage.pack.PackConfig;
 import org.eclipse.jgit.transport.PackedObjectInfo;
 import org.eclipse.jgit.util.BlockList;
 import org.eclipse.jgit.util.IO;
@@ -71,6 +71,8 @@ public class DfsInserter extends ObjectInserter {
 	private static final int INDEX_VERSION = 2;
 
 	final DfsObjDatabase db;
+
+	private final int minBytesForObjectSizeIndex;
 	int compression = Deflater.BEST_COMPRESSION;
 
 	List<PackedObjectInfo> objectList;
@@ -81,9 +83,6 @@ public class DfsInserter extends ObjectInserter {
 	DfsPackDescription packDsc;
 	PackStream packOut;
 	private boolean rollback;
-	private boolean checkExisting = true;
-
-	private int minBytesForObjectSizeIndex = -1;
 
 	/**
 	 * Initialize a new inserter.
@@ -93,40 +92,14 @@ public class DfsInserter extends ObjectInserter {
 	 */
 	protected DfsInserter(DfsObjDatabase db) {
 		this.db = db;
-		PackConfig pc = new PackConfig(db.getRepository().getConfig());
-		this.minBytesForObjectSizeIndex = pc.getMinBytesForObjSizeIndex();
-	}
-
-	/**
-	 * Check existence
-	 *
-	 * @param check
-	 *            if {@code false}, will write out possibly-duplicate objects
-	 *            without first checking whether they exist in the repo; default
-	 *            is true.
-	 */
-	public void checkExisting(boolean check) {
-		checkExisting = check;
+		this.minBytesForObjectSizeIndex = db.getRepository().getConfig().getInt(
+				ConfigConstants.CONFIG_PACK_SECTION,
+				ConfigConstants.CONFIG_KEY_MIN_BYTES_OBJ_SIZE_INDEX, -1);
 	}
 
 	void setCompressionLevel(int compression) {
 		this.compression = compression;
 	}
-
-	/**
-	 * Set minimum size for an object to be included in the object size index.
-	 *
-	 * <p>
-	 * Use 0 for all and -1 for nothing (the pack won't have object size index).
-	 *
-	 * @param minBytes
-	 *            only objects with size bigger or equal to this are included in
-	 *            the index.
-	 */
-	protected void setMinBytesForObjectSizeIndex(int minBytes) {
-		this.minBytesForObjectSizeIndex = minBytes;
-	}
-
 	@Override
 	public DfsPackParser newPackParser(InputStream in) throws IOException {
 		return new DfsPackParser(db, this, in);
@@ -144,8 +117,9 @@ public class DfsInserter extends ObjectInserter {
 		if (objectMap != null && objectMap.contains(id))
 			return id;
 		// Ignore unreachable (garbage) objects here.
-		if (checkExisting && db.has(id, true))
+		if (db.has(id, true)) {
 			return id;
+		}
 
 		long offset = beginObject(type, len);
 		packOut.compress.write(data, off, len);
@@ -333,7 +307,7 @@ public class DfsInserter extends ObjectInserter {
 
 	private static void index(OutputStream out, byte[] packHash,
 			List<PackedObjectInfo> list) throws IOException {
-		PackIndexWriter.createVersion(out, INDEX_VERSION).write(list, packHash);
+		BasePackIndexWriter.createVersion(out, INDEX_VERSION).write(list, packHash);
 	}
 
 	void writeObjectSizeIndex(DfsPackDescription pack,

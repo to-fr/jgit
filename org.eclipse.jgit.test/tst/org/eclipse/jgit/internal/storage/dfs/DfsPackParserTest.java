@@ -61,9 +61,11 @@ public class DfsPackParserTest {
 			ins.flush();
 		}
 
+		repo.getObjectDatabase().getReaderOptions().setUseObjectSizeIndex(true);
 		DfsReader reader = repo.getObjectDatabase().newReader();
 		PackList packList = repo.getObjectDatabase().getPackList();
 		assertEquals(1, packList.packs.length);
-		assertEquals(1, packList.packs[0].getIndexedObjectSize(reader, blobA));
+		assertEquals(1, packList.packs[0].getIndexedObjectSize(reader,
+				packList.packs[0].findIdxPosition(reader, blobA)));
 	}
 }

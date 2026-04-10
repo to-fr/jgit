@@ -21,6 +21,7 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.security.MessageDigest;
 import java.time.Instant;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -30,6 +31,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.TimeZone;
 
+import org.eclipse.jgit.annotations.Nullable;
 import org.eclipse.jgit.api.Git;
 import org.eclipse.jgit.dircache.DirCache;
 import org.eclipse.jgit.dircache.DirCacheBuilder;
@@ -71,6 +73,7 @@ import org.eclipse.jgit.revwalk.RevObject;
 import org.eclipse.jgit.revwalk.RevTag;
 import org.eclipse.jgit.revwalk.RevTree;
 import org.eclipse.jgit.revwalk.RevWalk;
+import org.eclipse.jgit.storage.pack.PackConfig;
 import org.eclipse.jgit.treewalk.TreeWalk;
 import org.eclipse.jgit.treewalk.filter.PathFilterGroup;
 import org.eclipse.jgit.util.ChangeIdUtil;
@@ -157,8 +160,8 @@ public class TestRepository<R extends Repository> implements AutoCloseable {
 		this.pool = rw;
 		this.inserter = db.newObjectInserter();
 		this.mockSystemReader = reader;
-		long now = mockSystemReader.getCurrentTime();
-		int tz = mockSystemReader.getTimezone(now);
+		Instant now = mockSystemReader.now();
+		ZoneId tz = mockSystemReader.getTimeZoneAt(now);
 		defaultAuthor = new PersonIdent(AUTHOR, AUTHOR_EMAIL, now, tz);
 		defaultCommitter = new PersonIdent(COMMITTER, COMMITTER_EMAIL, now, tz);
 	}
@@ -197,7 +200,9 @@ public class TestRepository<R extends Repository> implements AutoCloseable {
 	 *
 	 * @return current date.
 	 * @since 4.2
+	 * @deprecated Use {@link #getInstant()} instead.
 	 */
+	@Deprecated(since = "7.2")
 	public Date getDate() {
 		return new Date(mockSystemReader.getCurrentTime());
 	}
@@ -209,16 +214,29 @@ public class TestRepository<R extends Repository> implements AutoCloseable {
 	 * @since 6.8
 	 */
 	public Instant getInstant() {
-		return Instant.ofEpochMilli(mockSystemReader.getCurrentTime());
+		return mockSystemReader.now();
 	}
 
 	/**
 	 * Get timezone
 	 *
 	 * @return timezone used for default identities.
+	 * @deprecated Use {@link #getTimeZoneId()} instead.
 	 */
+	@Deprecated(since = "7.2")
 	public TimeZone getTimeZone() {
 		return mockSystemReader.getTimeZone();
+	}
+
+
+	/**
+	 * Get timezone
+	 *
+	 * @return timezone used for default identities.
+	 * @since 7.2
+	 */
+	public ZoneId getTimeZoneId() {
+		return mockSystemReader.getTimeZoneId();
 	}
 
 	/**
@@ -232,14 +250,14 @@ public class TestRepository<R extends Repository> implements AutoCloseable {
 	}
 
 	/**
-	 * Set the author and committer using {@link #getDate()}.
+	 * Set the author and committer using {@link #getInstant()}.
 	 *
 	 * @param c
 	 *            the commit builder to store.
 	 */
 	public void setAuthorAndCommitter(org.eclipse.jgit.lib.CommitBuilder c) {
-		c.setAuthor(new PersonIdent(defaultAuthor, getDate()));
-		c.setCommitter(new PersonIdent(defaultCommitter, getDate()));
+		c.setAuthor(new PersonIdent(defaultAuthor, getInstant()));
+		c.setCommitter(new PersonIdent(defaultCommitter, getInstant()));
 	}
 
 	/**
@@ -487,8 +505,8 @@ public class TestRepository<R extends Repository> implements AutoCloseable {
 		c = new org.eclipse.jgit.lib.CommitBuilder();
 		c.setTreeId(tree);
 		c.setParentIds(parents);
-		c.setAuthor(new PersonIdent(defaultAuthor, getDate()));
-		c.setCommitter(new PersonIdent(defaultCommitter, getDate()));
+		c.setAuthor(new PersonIdent(defaultAuthor, getInstant()));
+		c.setCommitter(new PersonIdent(defaultCommitter, getInstant()));
 		c.setMessage("");
 		ObjectId id;
 		try (ObjectInserter ins = inserter) {
@@ -528,7 +546,7 @@ public class TestRepository<R extends Repository> implements AutoCloseable {
 		final TagBuilder t = new TagBuilder();
 		t.setObjectId(dst);
 		t.setTag(name);
-		t.setTagger(new PersonIdent(defaultCommitter, getDate()));
+		t.setTagger(new PersonIdent(defaultCommitter, getInstant()));
 		t.setMessage("");
 		ObjectId id;
 		try (ObjectInserter ins = inserter) {
@@ -797,7 +815,7 @@ public class TestRepository<R extends Repository> implements AutoCloseable {
 			b.setParentId(head);
 			b.setTreeId(merger.getResultTreeId());
 			b.setAuthor(commit.getAuthorIdent());
-			b.setCommitter(new PersonIdent(defaultCommitter, getDate()));
+			b.setCommitter(new PersonIdent(defaultCommitter, getInstant()));
 			b.setMessage(commit.getFullMessage());
 			ObjectId result;
 			try (ObjectInserter ins = inserter) {
@@ -970,7 +988,7 @@ public class TestRepository<R extends Repository> implements AutoCloseable {
 			ObjectDirectory odb = (ObjectDirectory) db.getObjectDatabase();
 			NullProgressMonitor m = NullProgressMonitor.INSTANCE;
 
-			final PackFile pack, idx;
+			PackFile pack;
 			try (PackWriter pw = new PackWriter(db)) {
 				Set<ObjectId> all = new HashSet<>();
 				for (Ref r : db.getRefDatabase().getRefs())
@@ -985,12 +1003,22 @@ public class TestRepository<R extends Repository> implements AutoCloseable {
 				}
 				pack.setReadOnly();
 
-				idx = pack.create(PackExt.INDEX);
+				PackFile idx = pack.create(PackExt.INDEX);
 				try (OutputStream out =
 						new BufferedOutputStream(new FileOutputStream(idx))) {
 					pw.writeIndex(out);
 				}
 				idx.setReadOnly();
+
+				PackConfig pc = new PackConfig(db);
+				if (pc.getMinBytesForObjSizeIndex() >= 0) {
+					PackFile oidx = pack.create(PackExt.OBJECT_SIZE_INDEX);
+					try (OutputStream out = new BufferedOutputStream(
+							new FileOutputStream(oidx))) {
+						pw.writeObjectSizeIndex(out);
+					}
+					oidx.setReadOnly();
+				}
 			}
 
 			odb.openPack(pack);
@@ -1019,7 +1047,8 @@ public class TestRepository<R extends Repository> implements AutoCloseable {
 	private static void prunePacked(ObjectDirectory odb) throws IOException {
 		for (Pack p : odb.getPacks()) {
 			for (MutableEntry e : p)
-				FileUtils.delete(odb.fileFor(e.toObjectId()));
+				FileUtils.delete(odb.fileFor(e.toObjectId()),
+						FileUtils.SKIP_MISSING);
 		}
 	}
 
@@ -1144,15 +1173,18 @@ public class TestRepository<R extends Repository> implements AutoCloseable {
 		}
 
 		/**
-		 * set parent commit
+		 * Set parent commit
 		 *
 		 * @param p
-		 *            parent commit
+		 *            parent commit, can be {@code null}
 		 * @return this commit builder
 		 * @throws Exception
 		 *             if an error occurred
 		 */
-		public CommitBuilder parent(RevCommit p) throws Exception {
+		public CommitBuilder parent(@Nullable RevCommit p) throws Exception {
+			if (p == null) {
+				return this;
+			}
 			if (parents.isEmpty()) {
 				DirCacheBuilder b = tree.builder();
 				parseBody(p);
@@ -1403,7 +1435,7 @@ public class TestRepository<R extends Repository> implements AutoCloseable {
 					c.setAuthor(author);
 				if (committer != null) {
 					if (updateCommitterTime)
-						committer = new PersonIdent(committer, getDate());
+						committer = new PersonIdent(committer, getInstant());
 					c.setCommitter(committer);
 				}
 

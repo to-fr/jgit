@@ -11,6 +11,8 @@ package org.eclipse.jgit.api;
 
 import static org.eclipse.jgit.api.CherryPickCommitMessageProvider.ORIGINAL;
 import static org.eclipse.jgit.api.CherryPickCommitMessageProvider.ORIGINAL_WITH_REFERENCE;
+import static org.eclipse.jgit.lib.ConfigConstants.CONFIG_KEY_CONFLICTSTYLE;
+import static org.eclipse.jgit.lib.ConfigConstants.CONFIG_MERGE_SECTION;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
@@ -22,6 +24,7 @@ import java.io.IOException;
 import java.util.Iterator;
 
 import org.eclipse.jgit.api.CherryPickResult.CherryPickStatus;
+import org.eclipse.jgit.api.MergeCommand.ConflictStyle;
 import org.eclipse.jgit.api.ResetCommand.ResetType;
 import org.eclipse.jgit.api.errors.GitAPIException;
 import org.eclipse.jgit.api.errors.JGitInternalException;
@@ -34,6 +37,7 @@ import org.eclipse.jgit.lib.ConfigConstants;
 import org.eclipse.jgit.lib.Constants;
 import org.eclipse.jgit.lib.FileMode;
 import org.eclipse.jgit.lib.ObjectId;
+import org.eclipse.jgit.lib.RefDatabase;
 import org.eclipse.jgit.lib.ReflogReader;
 import org.eclipse.jgit.lib.RepositoryState;
 import org.eclipse.jgit.merge.ContentMergeStrategy;
@@ -395,6 +399,23 @@ public class CherryPickCommandTest extends RepositoryTestCase {
 	}
 
 	@Test
+	public void testCherryPickConflictDiff3Markers() throws Exception {
+		try (Git git = new Git(db)) {
+			RevCommit sideCommit = prepareCherryPick(git);
+
+			db.getConfig().setEnum(CONFIG_MERGE_SECTION, null,
+					CONFIG_KEY_CONFLICTSTYLE, ConflictStyle.DIFF3);
+
+			CherryPickResult result = git.cherryPick()
+					.include(sideCommit.getId()).call();
+			assertEquals(CherryPickStatus.CONFLICTING, result.getStatus());
+
+			String expected = "<<<<<<< master\na(master)\n||||||| BASE\na\n=======\na(side)\n>>>>>>> 527460a side\n";
+			checkFile(new File(db.getWorkTree(), "a"), expected);
+		}
+	}
+
+	@Test
 	public void testCherryPickConflictFiresModifiedEvent() throws Exception {
 		ListenerHandle listener = null;
 		try (Git git = new Git(db)) {
@@ -529,10 +550,11 @@ public class CherryPickCommandTest extends RepositoryTestCase {
 		assertEquals(RepositoryState.SAFE, db.getRepositoryState());
 
 		if (reason == null) {
-			ReflogReader reader = db.getReflogReader(Constants.HEAD);
+			RefDatabase refDb = db.getRefDatabase();
+			ReflogReader reader = refDb.getReflogReader(Constants.HEAD);
 			assertTrue(reader.getLastEntry().getComment()
 					.startsWith("cherry-pick: "));
-			reader = db.getReflogReader(db.getBranch());
+			reader = refDb.getReflogReader(db.getFullBranch());
 			assertTrue(reader.getLastEntry().getComment()
 					.startsWith("cherry-pick: "));
 		}

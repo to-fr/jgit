@@ -10,6 +10,8 @@
  */
 package org.eclipse.jgit.api;
 
+import static org.eclipse.jgit.lib.ConfigConstants.CONFIG_KEY_CONFLICTSTYLE;
+import static org.eclipse.jgit.lib.ConfigConstants.CONFIG_MERGE_SECTION;
 import static org.eclipse.jgit.lib.Constants.MASTER;
 import static org.eclipse.jgit.lib.Constants.R_HEADS;
 import static org.junit.Assert.assertEquals;
@@ -21,9 +23,13 @@ import static org.junit.Assert.fail;
 import static org.junit.Assume.assumeTrue;
 
 import java.io.File;
+import java.nio.file.DirectoryStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.Iterator;
 import java.util.regex.Pattern;
 
+import org.eclipse.jgit.api.MergeCommand.ConflictStyle;
 import org.eclipse.jgit.api.MergeCommand.FastForwardMode;
 import org.eclipse.jgit.api.MergeResult.MergeStatus;
 import org.eclipse.jgit.api.ResetCommand.ResetType;
@@ -33,6 +39,7 @@ import org.eclipse.jgit.junit.TestRepository;
 import org.eclipse.jgit.junit.TestRepository.BranchBuilder;
 import org.eclipse.jgit.lib.Constants;
 import org.eclipse.jgit.lib.Ref;
+import org.eclipse.jgit.lib.RefDatabase;
 import org.eclipse.jgit.lib.Repository;
 import org.eclipse.jgit.lib.RepositoryState;
 import org.eclipse.jgit.lib.Sets;
@@ -45,6 +52,7 @@ import org.eclipse.jgit.util.FS;
 import org.eclipse.jgit.util.FileUtils;
 import org.eclipse.jgit.util.GitDateFormatter;
 import org.eclipse.jgit.util.GitDateFormatter.Format;
+import org.junit.Assume;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.experimental.theories.DataPoints;
@@ -76,12 +84,12 @@ public class MergeCommandTest extends RepositoryTestCase {
 			assertEquals(MergeResult.MergeStatus.ALREADY_UP_TO_DATE, result.getMergeStatus());
 		}
 		// no reflog entry written by merge
-		assertEquals("commit (initial): initial commit",
-				db
+		RefDatabase refDb = db.getRefDatabase();
+		assertEquals("commit (initial): initial commit", refDb
 				.getReflogReader(Constants.HEAD).getLastEntry().getComment());
-		assertEquals("commit (initial): initial commit",
-				db
-				.getReflogReader(db.getBranch()).getLastEntry().getComment());
+		assertEquals("commit (initial): initial commit", refDb
+				.getReflogReader(db.getFullBranch()).getLastEntry()
+				.getComment());
 	}
 
 	@Test
@@ -96,10 +104,11 @@ public class MergeCommandTest extends RepositoryTestCase {
 			assertEquals(second, result.getNewHead());
 		}
 		// no reflog entry written by merge
-		assertEquals("commit: second commit", db
+		assertEquals("commit: second commit", db.getRefDatabase()
 				.getReflogReader(Constants.HEAD).getLastEntry().getComment());
-		assertEquals("commit: second commit", db
-				.getReflogReader(db.getBranch()).getLastEntry().getComment());
+		assertEquals("commit: second commit", db.getRefDatabase()
+				.getReflogReader(db.getFullBranch()).getLastEntry()
+				.getComment());
 	}
 
 	@Test
@@ -117,10 +126,13 @@ public class MergeCommandTest extends RepositoryTestCase {
 			assertEquals(MergeResult.MergeStatus.FAST_FORWARD, result.getMergeStatus());
 			assertEquals(second, result.getNewHead());
 		}
+		RefDatabase refDb = db.getRefDatabase();
 		assertEquals("merge refs/heads/master: Fast-forward",
-				db.getReflogReader(Constants.HEAD).getLastEntry().getComment());
+				refDb.getReflogReader(Constants.HEAD)
+						.getLastEntry().getComment());
 		assertEquals("merge refs/heads/master: Fast-forward",
-				db.getReflogReader(db.getBranch()).getLastEntry().getComment());
+				refDb.getReflogReader(db.getFullBranch())
+						.getLastEntry().getComment());
 	}
 
 	@Test
@@ -140,10 +152,12 @@ public class MergeCommandTest extends RepositoryTestCase {
 					result.getMergeStatus());
 			assertEquals(second, result.getNewHead());
 		}
-		assertEquals("merge refs/heads/master: Fast-forward", db
+		RefDatabase refDb = db.getRefDatabase();
+		assertEquals("merge refs/heads/master: Fast-forward", refDb
 				.getReflogReader(Constants.HEAD).getLastEntry().getComment());
-		assertEquals("merge refs/heads/master: Fast-forward", db
-				.getReflogReader(db.getBranch()).getLastEntry().getComment());
+		assertEquals("merge refs/heads/master: Fast-forward", refDb
+				.getReflogReader(db.getFullBranch()).getLastEntry()
+				.getComment());
 	}
 
 	@Test
@@ -171,10 +185,12 @@ public class MergeCommandTest extends RepositoryTestCase {
 			assertEquals(MergeResult.MergeStatus.FAST_FORWARD, result.getMergeStatus());
 			assertEquals(second, result.getNewHead());
 		}
-		assertEquals("merge refs/heads/master: Fast-forward",
-				db.getReflogReader(Constants.HEAD).getLastEntry().getComment());
-		assertEquals("merge refs/heads/master: Fast-forward",
-				db.getReflogReader(db.getBranch()).getLastEntry().getComment());
+		RefDatabase refDb = db.getRefDatabase();
+		assertEquals("merge refs/heads/master: Fast-forward", refDb
+				.getReflogReader(Constants.HEAD).getLastEntry().getComment());
+		assertEquals("merge refs/heads/master: Fast-forward", refDb
+				.getReflogReader(db.getFullBranch()).getLastEntry()
+				.getComment());
 	}
 
 	@Test
@@ -229,14 +245,17 @@ public class MergeCommandTest extends RepositoryTestCase {
 					.include(db.exactRef(R_HEADS + MASTER)).call();
 			assertEquals(MergeStatus.MERGED, result.getMergeStatus());
 		}
+		RefDatabase refDb = db.getRefDatabase();
 		assertEquals(
 				"merge refs/heads/master: Merge made by "
 						+ mergeStrategy.getName() + ".",
-				db.getReflogReader(Constants.HEAD).getLastEntry().getComment());
+				refDb.getReflogReader(Constants.HEAD).getLastEntry()
+						.getComment());
 		assertEquals(
 				"merge refs/heads/master: Merge made by "
 						+ mergeStrategy.getName() + ".",
-				db.getReflogReader(db.getBranch()).getLastEntry().getComment());
+				refDb.getReflogReader(db.getFullBranch()).getLastEntry()
+						.getComment());
 	}
 
 	@Theory
@@ -662,14 +681,17 @@ public class MergeCommandTest extends RepositoryTestCase {
 					.setStrategy(MergeStrategy.RESOLVE).call();
 			assertEquals(MergeStatus.MERGED, result.getMergeStatus());
 			assertEquals("1\nb(1)\n3\n", read(new File(db.getWorkTree(), "b")));
-			assertEquals("merge " + secondCommit.getId().getName()
-					+ ": Merge made by resolve.", db
-					.getReflogReader(Constants.HEAD)
-					.getLastEntry().getComment());
-			assertEquals("merge " + secondCommit.getId().getName()
-					+ ": Merge made by resolve.", db
-					.getReflogReader(db.getBranch())
-					.getLastEntry().getComment());
+			RefDatabase refDb = db.getRefDatabase();
+			assertEquals(
+					"merge " + secondCommit.getId().getName()
+							+ ": Merge made by resolve.",
+					refDb.getReflogReader(Constants.HEAD).getLastEntry()
+							.getComment());
+			assertEquals(
+					"merge " + secondCommit.getId().getName()
+							+ ": Merge made by resolve.",
+					refDb.getReflogReader(db.getFullBranch()).getLastEntry()
+							.getComment());
 		}
 	}
 
@@ -2086,6 +2108,94 @@ public class MergeCommandTest extends RepositoryTestCase {
 		}
 	}
 
+	@Test
+	public void testMergeCaseInsensitiveRename() throws Exception {
+		Assume.assumeTrue(
+				"Test makes only sense on a case-insensitive file system",
+				db.isWorkTreeCaseInsensitive());
+		try (Git git = new Git(db)) {
+			writeTrashFile("a", "aaa");
+			git.add().addFilepattern("a").call();
+			RevCommit initialCommit = git.commit().setMessage("initial").call();
+			// "Rename" "a" to "A"
+			git.rm().addFilepattern("a").call();
+			writeTrashFile("A", "aaa");
+			git.add().addFilepattern("A").call();
+			RevCommit master = git.commit().setMessage("rename to A").call();
+
+			createBranch(initialCommit, "refs/heads/side");
+			checkoutBranch("refs/heads/side");
+
+			writeTrashFile("b", "bbb");
+			git.add().addFilepattern("b").call();
+			git.commit().setMessage("side").call();
+
+			// Merge master into side
+			MergeResult result = git.merge().include(master)
+					.setStrategy(MergeStrategy.RECURSIVE).call();
+			assertEquals(MergeStatus.MERGED, result.getMergeStatus());
+			assertTrue(new File(db.getWorkTree(), "A").isFile());
+			// Double check
+			boolean found = true;
+			try (DirectoryStream<Path> dir = Files
+					.newDirectoryStream(db.getWorkTree().toPath())) {
+				for (Path p : dir) {
+					found = "A".equals(p.getFileName().toString());
+					if (found) {
+						break;
+					}
+				}
+			}
+			assertTrue(found);
+		}
+	}
+
+	@Test
+	public void testMergeCaseInsensitiveRenameConflict() throws Exception {
+		Assume.assumeTrue(
+				"Test makes only sense on a case-insensitive file system",
+				db.isWorkTreeCaseInsensitive());
+		try (Git git = new Git(db)) {
+			writeTrashFile("a", "aaa");
+			git.add().addFilepattern("a").call();
+			RevCommit initialCommit = git.commit().setMessage("initial").call();
+			// "Rename" "a" to "A" and change it
+			git.rm().addFilepattern("a").call();
+			writeTrashFile("A", "yyy");
+			git.add().addFilepattern("A").call();
+			RevCommit master = git.commit().setMessage("rename to A").call();
+
+			createBranch(initialCommit, "refs/heads/side");
+			checkoutBranch("refs/heads/side");
+
+			writeTrashFile("a", "xxx");
+			git.add().addFilepattern("a").call();
+			git.commit().setMessage("side").call();
+
+			// Merge master into side
+			MergeResult result = git.merge().include(master)
+					.setStrategy(MergeStrategy.RECURSIVE).call();
+			assertEquals(MergeStatus.CONFLICTING, result.getMergeStatus());
+			File a = new File(db.getWorkTree(), "A");
+			assertTrue(a.isFile());
+			// Double check
+			boolean found = true;
+			try (DirectoryStream<Path> dir = Files
+					.newDirectoryStream(db.getWorkTree().toPath())) {
+				for (Path p : dir) {
+					found = "A".equals(p.getFileName().toString());
+					if (found) {
+						break;
+					}
+				}
+			}
+			assertTrue(found);
+			assertEquals(1, result.getConflicts().size());
+			assertTrue(result.getConflicts().containsKey("a"));
+			checkFile(a, "yyy");
+		}
+	}
+
 	private static void setExecutable(Git git, String path, boolean executable) {
 		FS.DETECTED.setExecute(
 				new File(git.getRepository().getWorkTree(), path), executable);
@@ -2112,5 +2222,38 @@ public class MergeCommandTest extends RepositoryTestCase {
 		assertEquals(indexState, indexState(CONTENT));
 		assertEquals(null, result.getConflicts());
 		assertEquals(RepositoryState.SAFE, db.getRepositoryState());
+	}
+
+	@Test
+	public void testDiff3ConflictStyle() throws Exception {
+		try (Git git = new Git(db)) {
+			writeTrashFile("a", "1\na\n3\n");
+			git.add().addFilepattern("a").call();
+			RevCommit initialCommit = git.commit().setMessage("initial").call();
+
+			createBranch(initialCommit, "refs/heads/side");
+			checkoutBranch("refs/heads/side");
+
+			writeTrashFile("a", "1\na(side)\n3\n");
+			git.add().addFilepattern("a").call();
+			RevCommit secondCommit = git.commit().setMessage("side").call();
+
+			checkoutBranch("refs/heads/master");
+
+			writeTrashFile("a", "1\na(main)\n3\n");
+			git.add().addFilepattern("a").call();
+			git.commit().setMessage("main").call();
+
+			db.getConfig().setEnum(CONFIG_MERGE_SECTION, null,
+					CONFIG_KEY_CONFLICTSTYLE, ConflictStyle.DIFF3);
+
+			MergeResult result = git.merge().include(secondCommit.getId())
+					.setStrategy(MergeStrategy.RESOLVE).call();
+			assertEquals(MergeStatus.CONFLICTING, result.getMergeStatus());
+
+			assertEquals(
+					"1\n<<<<<<< HEAD\na(main)\n||||||| BASE\na\n=======\na(side)\n>>>>>>> d97aebf6e0bbdb3f21f8a22ec8cbf1ac24d986d8\n3\n",
+					read(new File(db.getWorkTree(), "a")));
+		}
 	}
 }

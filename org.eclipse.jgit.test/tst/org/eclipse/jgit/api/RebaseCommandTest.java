@@ -10,6 +10,8 @@
 package org.eclipse.jgit.api;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
+import static org.eclipse.jgit.lib.ConfigConstants.CONFIG_KEY_CONFLICTSTYLE;
+import static org.eclipse.jgit.lib.ConfigConstants.CONFIG_MERGE_SECTION;
 import static org.hamcrest.CoreMatchers.equalTo;
 import static org.hamcrest.CoreMatchers.not;
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -24,10 +26,13 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
 
+import org.eclipse.jgit.api.MergeCommand.ConflictStyle;
 import org.eclipse.jgit.api.MergeResult.MergeStatus;
 import org.eclipse.jgit.api.RebaseCommand.InteractiveHandler;
 import org.eclipse.jgit.api.RebaseCommand.InteractiveHandler2;
@@ -55,6 +60,7 @@ import org.eclipse.jgit.lib.ObjectLoader;
 import org.eclipse.jgit.lib.PersonIdent;
 import org.eclipse.jgit.lib.RebaseTodoLine;
 import org.eclipse.jgit.lib.RebaseTodoLine.Action;
+import org.eclipse.jgit.lib.RefDatabase;
 import org.eclipse.jgit.lib.RefUpdate;
 import org.eclipse.jgit.lib.ReflogEntry;
 import org.eclipse.jgit.lib.RepositoryState;
@@ -131,11 +137,12 @@ public class RebaseCommandTest extends RepositoryTestCase {
 		checkFile(file2, "file2");
 		assertEquals(Status.FAST_FORWARD, res.getStatus());
 
-		List<ReflogEntry> headLog = db.getReflogReader(Constants.HEAD)
+		RefDatabase refDb = db.getRefDatabase();
+		List<ReflogEntry> headLog = refDb.getReflogReader(Constants.HEAD)
 				.getReverseEntries();
-		List<ReflogEntry> topicLog = db.getReflogReader("refs/heads/topic")
+		List<ReflogEntry> topicLog = refDb.getReflogReader("refs/heads/topic")
 				.getReverseEntries();
-		List<ReflogEntry> masterLog = db.getReflogReader("refs/heads/master")
+		List<ReflogEntry> masterLog = refDb.getReflogReader("refs/heads/master")
 				.getReverseEntries();
 		assertEquals("rebase finished: returning to refs/heads/topic", headLog
 				.get(0).getComment());
@@ -177,11 +184,12 @@ public class RebaseCommandTest extends RepositoryTestCase {
 		checkFile(file2, "file2 new content");
 		assertEquals(Status.FAST_FORWARD, res.getStatus());
 
-		List<ReflogEntry> headLog = db.getReflogReader(Constants.HEAD)
+		RefDatabase refDb = db.getRefDatabase();
+		List<ReflogEntry> headLog = refDb.getReflogReader(Constants.HEAD)
 				.getReverseEntries();
-		List<ReflogEntry> topicLog = db.getReflogReader("refs/heads/topic")
+		List<ReflogEntry> topicLog = refDb.getReflogReader("refs/heads/topic")
 				.getReverseEntries();
-		List<ReflogEntry> masterLog = db.getReflogReader("refs/heads/master")
+		List<ReflogEntry> masterLog = refDb.getReflogReader("refs/heads/master")
 				.getReverseEntries();
 		assertEquals("rebase finished: returning to refs/heads/topic", headLog
 				.get(0).getComment());
@@ -366,6 +374,43 @@ public class RebaseCommandTest extends RepositoryTestCase {
 	}
 
 	/**
+	 * Create a commit A and an unrelated commit B creating the same file with
+	 * different content. Then rebase A onto B. The rebase should stop with a
+	 * conflict and the conflict style should be DIFF3.
+	 *
+	 * @throws Exception on errors
+	 */
+	@Test
+	public void testRebaseNoMergeBaseConflictDiff3() throws Exception {
+		writeTrashFile(FILE1, FILE1);
+		git.add().addFilepattern(FILE1).call();
+		RevCommit first = git.commit().setMessage("Add file").call();
+		File file1 = new File(db.getWorkTree(), FILE1);
+		assertTrue(file1.exists());
+		// Create an independent branch
+		git.checkout().setOrphan(true).setName("orphan").call();
+		git.rm().addFilepattern(FILE1).call();
+		assertFalse(file1.exists());
+		writeTrashFile(FILE1, "something else");
+		git.add().addFilepattern(FILE1).call();
+		git.commit().setMessage("Orphan").call();
+		checkoutBranch("refs/heads/master");
+		assertEquals(first.getId(), db.resolve("HEAD"));
+
+		db.getConfig().setEnum(CONFIG_MERGE_SECTION, null,
+				CONFIG_KEY_CONFLICTSTYLE, ConflictStyle.DIFF3);
+
+		RebaseResult res = git.rebase().setUpstream("refs/heads/orphan").call();
+		assertEquals(Status.STOPPED, res.getStatus());
+		assertEquals(first, res.getCurrentCommit());
+		checkFile(file1,
+				"<<<<<<< Upstream, based on orphan\n" + "something else\n"
+						+ "||||||| BASE\n" + "=======\n" + "file1\n"
+						+ ">>>>>>> "
+						+ first.abbreviate(7).name() + " Add file\n");
+	}
+
+	/**
 	 * Create the following commits and then attempt to rebase topic onto
 	 * master. This will serialize the branches.
 	 *
@@ -445,13 +490,14 @@ public class RebaseCommandTest extends RepositoryTestCase {
 			assertEquals(a, rw.next());
 		}
 
-		List<ReflogEntry> headLog = db.getReflogReader(Constants.HEAD)
+		RefDatabase refDb = db.getRefDatabase();
+		List<ReflogEntry> headLog = refDb.getReflogReader(Constants.HEAD)
 				.getReverseEntries();
-		List<ReflogEntry> sideLog = db.getReflogReader("refs/heads/side")
+		List<ReflogEntry> sideLog = refDb.getReflogReader("refs/heads/side")
 				.getReverseEntries();
-		List<ReflogEntry> topicLog = db.getReflogReader("refs/heads/topic")
+		List<ReflogEntry> topicLog = refDb.getReflogReader("refs/heads/topic")
 				.getReverseEntries();
-		List<ReflogEntry> masterLog = db.getReflogReader("refs/heads/master")
+		List<ReflogEntry> masterLog = refDb.getReflogReader("refs/heads/master")
 				.getReverseEntries();
 		assertEquals("rebase finished: returning to refs/heads/topic", headLog
 				.get(0).getComment());
@@ -766,9 +812,10 @@ public class RebaseCommandTest extends RepositoryTestCase {
 		RebaseResult result = git.rebase().setUpstream(parent).call();
 		assertEquals(Status.UP_TO_DATE, result.getStatus());
 
-		assertEquals(2, db.getReflogReader(Constants.HEAD).getReverseEntries()
-				.size());
-		assertEquals(2, db.getReflogReader("refs/heads/master")
+		RefDatabase refDb = db.getRefDatabase();
+		assertEquals(2, refDb.getReflogReader(Constants.HEAD)
+				.getReverseEntries().size());
+		assertEquals(2, refDb.getReflogReader("refs/heads/master")
 				.getReverseEntries().size());
 	}
 
@@ -784,9 +831,10 @@ public class RebaseCommandTest extends RepositoryTestCase {
 		RebaseResult res = git.rebase().setUpstream(first).call();
 		assertEquals(Status.UP_TO_DATE, res.getStatus());
 
-		assertEquals(1, db.getReflogReader(Constants.HEAD).getReverseEntries()
-				.size());
-		assertEquals(1, db.getReflogReader("refs/heads/master")
+		RefDatabase refDb = db.getRefDatabase();
+		assertEquals(1, refDb.getReflogReader(Constants.HEAD)
+				.getReverseEntries().size());
+		assertEquals(1, refDb.getReflogReader("refs/heads/master")
 				.getReverseEntries().size());
 	}
 
@@ -844,11 +892,12 @@ public class RebaseCommandTest extends RepositoryTestCase {
 					db.resolve(Constants.HEAD)).getParent(0));
 		}
 		assertEquals(origHead, db.readOrigHead());
-		List<ReflogEntry> headLog = db.getReflogReader(Constants.HEAD)
+		RefDatabase refDb = db.getRefDatabase();
+		List<ReflogEntry> headLog = refDb.getReflogReader(Constants.HEAD)
 				.getReverseEntries();
-		List<ReflogEntry> topicLog = db.getReflogReader("refs/heads/topic")
+		List<ReflogEntry> topicLog = refDb.getReflogReader("refs/heads/topic")
 				.getReverseEntries();
-		List<ReflogEntry> masterLog = db.getReflogReader("refs/heads/master")
+		List<ReflogEntry> masterLog = refDb.getReflogReader("refs/heads/master")
 				.getReverseEntries();
 		assertEquals(2, masterLog.size());
 		assertEquals(3, topicLog.size());
@@ -896,8 +945,8 @@ public class RebaseCommandTest extends RepositoryTestCase {
 					db.resolve(Constants.HEAD)).getParent(0));
 		}
 
-		List<ReflogEntry> headLog = db.getReflogReader(Constants.HEAD)
-				.getReverseEntries();
+		List<ReflogEntry> headLog = db.getRefDatabase()
+				.getReflogReader(Constants.HEAD).getReverseEntries();
 		assertEquals(8, headLog.size());
 		assertEquals("rebase: change file1 in topic", headLog.get(0)
 				.getComment());
@@ -1603,7 +1652,7 @@ public class RebaseCommandTest extends RepositoryTestCase {
 	public void testAuthorScriptConverter() throws Exception {
 		// -1 h timezone offset
 		PersonIdent ident = new PersonIdent("Author name", "a.mail@some.com",
-				123456789123L, -60);
+				Instant.ofEpochMilli(123456789123L), ZoneOffset.ofHours(-1));
 		String convertedAuthor = git.rebase().toAuthorScript(ident);
 		String[] lines = convertedAuthor.split("\n");
 		assertEquals("GIT_AUTHOR_NAME='Author name'", lines[0]);
@@ -1615,12 +1664,14 @@ public class RebaseCommandTest extends RepositoryTestCase {
 		assertEquals(ident.getName(), parsedIdent.getName());
 		assertEquals(ident.getEmailAddress(), parsedIdent.getEmailAddress());
 		// this is rounded to the last second
-		assertEquals(123456789000L, parsedIdent.getWhen().getTime());
-		assertEquals(ident.getTimeZoneOffset(), parsedIdent.getTimeZoneOffset());
+		assertEquals(123456789000L,
+				parsedIdent.getWhenAsInstant().toEpochMilli());
+		assertEquals(ident.getZoneId(), parsedIdent.getZoneId());
 
 		// + 9.5h timezone offset
 		ident = new PersonIdent("Author name", "a.mail@some.com",
-				123456789123L, +570);
+				Instant.ofEpochMilli(123456789123L),
+				ZoneOffset.ofHoursMinutes(9, 30));
 		convertedAuthor = git.rebase().toAuthorScript(ident);
 		lines = convertedAuthor.split("\n");
 		assertEquals("GIT_AUTHOR_NAME='Author name'", lines[0]);
@@ -1631,8 +1682,9 @@ public class RebaseCommandTest extends RepositoryTestCase {
 				convertedAuthor.getBytes(UTF_8));
 		assertEquals(ident.getName(), parsedIdent.getName());
 		assertEquals(ident.getEmailAddress(), parsedIdent.getEmailAddress());
-		assertEquals(123456789000L, parsedIdent.getWhen().getTime());
-		assertEquals(ident.getTimeZoneOffset(), parsedIdent.getTimeZoneOffset());
+		assertEquals(123456789000L,
+				parsedIdent.getWhenAsInstant().toEpochMilli());
+		assertEquals(ident.getZoneId(), parsedIdent.getZoneId());
 	}
 
 	@Test

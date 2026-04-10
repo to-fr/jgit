@@ -9,14 +9,17 @@
  */
 package org.eclipse.jgit.api;
 
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
-import java.util.Date;
+import java.io.IOException;
+import java.time.Instant;
 import java.util.Properties;
 
 import org.eclipse.jgit.junit.RepositoryTestCase;
-import org.eclipse.jgit.util.GitDateParser;
-import org.eclipse.jgit.util.SystemReader;
+import org.eclipse.jgit.lib.GcConfig;
+import org.eclipse.jgit.lib.GcConfig.PackRefsMode;
+import org.eclipse.jgit.util.GitTimeParser;
 import org.junit.Before;
 import org.junit.Test;
 
@@ -35,10 +38,25 @@ public class GarbageCollectCommandTest extends RepositoryTestCase {
 	}
 
 	@Test
+	public void testPackRefs() throws Exception {
+		assertTrue(hasLooseRef(git));
+
+		// by default, refs should be packed
+		git.gc().call();
+		assertFalse(hasLooseRef(git));
+
+		// now create a loose ref again
+		git.branchCreate().setName("foo").call();
+		assertTrue(hasLooseRef(git));
+
+		git.gc().setGcConfig(new GcConfig(PackRefsMode.FALSE)).call();
+		assertTrue(hasLooseRef(git));
+	}
+
+	@Test
 	public void testGConeCommit() throws Exception {
-		Date expire = GitDateParser.parse("now", null, SystemReader
-				.getInstance().getLocale());
-		Properties res = git.gc().setExpire(expire).call();
+		Instant expireNow = GitTimeParser.parseInstant("now");
+		Properties res = git.gc().setExpire(expireNow).call();
 		assertTrue(res.size() == 8);
 	}
 
@@ -52,11 +70,14 @@ public class GarbageCollectCommandTest extends RepositoryTestCase {
 		writeTrashFile("b.txt", "a couple of words for gc to pack more 2");
 		writeTrashFile("c.txt", "a couple of words for gc to pack more 3");
 		git.commit().setAll(true).setMessage("commit3").call();
-		Properties res = git
-				.gc()
-				.setExpire(
-						GitDateParser.parse("now", null, SystemReader
-								.getInstance().getLocale())).call();
+		Instant expireNow = GitTimeParser.parseInstant("now");
+		Properties res = git.gc().setExpire(expireNow).call();
 		assertTrue(res.size() == 8);
+	}
+
+	private static boolean hasLooseRef(Git git) throws IOException {
+		return git.getRepository().getRefDatabase().getRefs().stream()
+				.filter(r -> !r.isSymbolic())
+				.anyMatch(r -> r.getStorage().isLoose());
 	}
 }

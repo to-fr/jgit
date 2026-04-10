@@ -278,6 +278,44 @@ public final class StringUtils {
 	}
 
 	/**
+	 * Remove the specified character from beginning and end of a string
+	 * <p>
+	 * If the character repeats, all copies
+	 *
+	 * @param str input string
+	 * @param c character to remove
+	 * @return the input string with c
+	 * @since 7.2
+	 */
+	public static String trim(String str, char c) {
+		if (str == null || str.length() == 0) {
+			return str;
+		}
+
+		int endPos = str.length()-1;
+		while (endPos >= 0 && str.charAt(endPos) == c) {
+			endPos--;
+		}
+
+		// Whole string is c
+		if (endPos == -1) {
+			return EMPTY;
+		}
+
+		int startPos = 0;
+		while (startPos < endPos && str.charAt(startPos) == c) {
+			startPos++;
+		}
+
+		if (startPos == 0 && endPos == str.length()-1) {
+			// No need to copy
+			return str;
+		}
+
+		return str.substring(startPos, endPos+1);
+	}
+
+	/**
 	 * Appends {@link Constants#DOT_GIT_EXT} unless the given name already ends
 	 * with that suffix.
 	 *
@@ -500,5 +538,34 @@ public final class StringUtils {
 			}
 		}
 		return first;
+	}
+
+	/**
+	 * Escapes all ISO control characters in {@code text} by their Unicode
+	 * string representation. TAB, CR, and LF are preserved.
+	 *
+	 * @param text
+	 *            to escape
+	 * @return the text with all ISO control characters except TAB, CR, and LF
+	 *         replaced by their Unicode representation
+	 * @since 7.5
+	 */
+	public static @NonNull String escapeControls(@Nullable String text) {
+		if (text == null) {
+			return ""; //$NON-NLS-1$
+		}
+		StringBuilder b = new StringBuilder();
+		int l = text.length();
+		for (int i = 0; i < l; i++) {
+			char ch = text.charAt(i);
+			if (Character.isISOControl(ch)
+					&& !(ch == '\t' || ch == '\r' || ch == '\n')) {
+				b.append(ch <= 0xF ? "\\u000" : "\\u00") //$NON-NLS-1$ //$NON-NLS-2$
+						.append(Integer.toHexString(ch));
+			} else {
+				b.append(ch);
+			}
+		}
+		return b.toString();
 	}
 }
